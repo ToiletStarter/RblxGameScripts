@@ -21,6 +21,8 @@ local session = {
         health = true,
         distance = true,
         tracers = false,
+        playerTracers = false,
+        monsterTracers = false,
         skeleton = false,
         arrows = false,
         visibility = true,
@@ -39,10 +41,22 @@ local session = {
         customCursor = true,
         vehicles = true,
         containers = true,
+        containerDrawers = true,
+        containerFridges = true,
+        containerCabinets = true,
+        containerCrates = true,
+        containerLockers = true,
+        containerVehicles = true,
+        containerOther = true,
         bodies = true,
         pois = true,
         items = true,
-        monsterObjects = true,
+        itemsWeapons = true,
+        itemsAmmo = true,
+        itemsMedical = true,
+        itemsRare = true,
+        itemsMisc = true,
+        mother = true,
     },
 }
 
@@ -120,12 +134,15 @@ local function pathOf(instance)
 end
 
 local worldCaches = {}
-for _, category in ipairs({ "vehicles", "containers", "bodies", "pois", "itemsWeapons", "itemsAmmo", "itemsMedical", "itemsRare", "itemsMisc" }) do
+for _, category in ipairs({ "vehicles", "containers", "bodies", "pois", "mother", "itemsWeapons", "itemsAmmo", "itemsMedical", "itemsRare", "itemsMisc" }) do
     worldCaches[category] = { list = {}, set = {}, dirty = true }
 end
 
+local containerKinds = setmetatable({}, { __mode = "k" })
+
 local poiTerms = { "motel", "checkpoint", "hospital", "policestation", "garage", "carpark", "deepwell", "bunker", "outpost", "gasstation", "diner", "cafe", "school", "warehouse", "workshop", "precinct", "farmhouse", "church" }
-local containerTerms = { "crate", "chest", "locker", "drawer", "cabinet", "fridge", "shelf", "stash", "lootbag", "shippingcontainer", "truckload", "weaponcrate" }
+local containerTerms = { "container", "crate", "chest", "locker", "drawer", "cabinet", "fridge", "shelf", "stash", "lootbag", "truckload", "weaponcrate" }
+local containerModelTerms = { "crate", "chest", "locker", "lootbag", "truckload", "weaponcrate" }
 local vehicleNames = { car = true, truck = true, van = true, vehicle = true, boat = true, bike = true, motorcycle = true }
 
 local npcCache = { list = {}, set = {}, dirty = true }
@@ -195,6 +212,10 @@ local function isBodyCandidate(candidate)
     return candidate:IsA("Model") and (pathHas(candidate, ".bodies.") or attribute(candidate, "Ragdoll") == true)
 end
 
+local function isMotherCandidate(candidate)
+    return candidate:IsA("Model") and (string.lower(safeName(candidate)) == "mother" or pathHas(candidate, ".mothermouthful."))
+end
+
 local function isMonsterCandidate(candidate)
     return candidate:IsA("Model") and (pathHas(candidate, ".monsters.") or pathHas(candidate, ".walkers.") or attribute(candidate, "Kind") ~= nil)
 end
@@ -208,16 +229,18 @@ end
 
 local function itemCategory(candidate)
     local name = string.lower(safeName(candidate))
-    if attribute(candidate, "RareFind") == true then
+    local detail = string.lower(tostring(attribute(candidate, "ItemType") or attribute(candidate, "Category") or attribute(candidate, "DisplayName") or ""))
+    local text = name .. " " .. detail
+    if attribute(candidate, "RareFind") == true or hasTerm(text, { "access", "keycard", "badge", "credential", "pass" }) then
         return "itemsRare"
     end
-    if hasTerm(name, { "ammo", "bullet", "shell", "powder", "nails" }) then
+    if hasTerm(text, { "ammo", "bullet", "shell", "powder", "nails" }) then
         return "itemsAmmo"
     end
-    if hasTerm(name, { "med", "medical", "bandage", "water", "food", "crackers" }) then
+    if hasTerm(text, { "med", "medical", "bandage", "water", "food", "crackers" }) then
         return "itemsMedical"
     end
-    if hasTerm(name, { "gun", "shotgun", "pistol", "rifle", "launcher", "silencer", "grip", "barrel", "weapon" }) then
+    if hasTerm(text, { "gun", "shotgun", "pistol", "rifle", "launcher", "silencer", "grip", "barrel", "weapon" }) then
         return "itemsWeapons"
     end
     return "itemsMisc"
@@ -255,15 +278,64 @@ local function removeWorldCandidate(instance)
     end
 end
 
+local function containerKind(anchor, containerType)
+    local value = string.lower(tostring(containerType or safeName(anchor)))
+    if hasTerm(value, { "drawer" }) then
+        return "drawers"
+    end
+    if hasTerm(value, { "fridge", "refrigerator" }) then
+        return "fridges"
+    end
+    if hasTerm(value, { "cabinet", "shelf", "medical" }) then
+        return "cabinets"
+    end
+    if hasTerm(value, { "crate", "chest", "supply", "weapon" }) then
+        return "crates"
+    end
+    if hasTerm(value, { "locker", "container" }) then
+        return "lockers"
+    end
+    if hasTerm(value, { "cartrunk", "truck", "cargo", "vehicle" }) then
+        return "vehicles"
+    end
+    return "other"
+end
+
+local function containerEnabled(kind)
+    return session.state["container" .. kind:sub(1, 1):upper() .. kind:sub(2)] == true
+end
+
+local function filteredList(cache, predicate)
+    local list = cachedList(cache)
+    if not predicate then
+        return list
+    end
+    local filtered = {}
+    for _, instance in ipairs(list) do
+        if predicate(instance) then
+            filtered[#filtered + 1] = instance
+        end
+    end
+    return filtered
+end
+
 local function inspectPrompt(prompt)
     local anchor = prompt.Parent
     if not anchor or pathHas(anchor, ".bodies.") then
         return
     end
     local promptName = string.lower(prompt.Name)
+    if promptName:find("pickup", 1, true) or promptName:find("collect", 1, true) or promptName:find("take", 1, true) or promptName:find("grab", 1, true) then
+        local item = candidateFor(anchor) or anchor
+        if item and not isBodyCandidate(item) and not isMonsterCandidate(item) then
+            addWorldCandidate(item, itemCategory(item))
+        end
+        return
+    end
     local containerType = attribute(anchor, "ContainerType")
     local anchorName = string.lower(safeName(anchor))
     if containerType or promptName:find("search", 1, true) or promptName:find("loot", 1, true) or anchorName:find("lootbag", 1, true) or pathHas(anchor, ".lootbags.") then
+        containerKinds[anchor] = containerKind(anchor, containerType)
         addWorldCandidate(anchor, "containers")
     end
 end
@@ -280,6 +352,10 @@ local function classifyWorldCandidate(candidate)
         addWorldCandidate(candidate, "pois")
         return
     end
+    if isMotherCandidate(candidate) then
+        addWorldCandidate(candidate, "mother")
+        return
+    end
     if isMonsterCandidate(candidate) then
         return
     end
@@ -291,7 +367,8 @@ local function classifyWorldCandidate(candidate)
         addWorldCandidate(candidate, itemCategory(candidate))
         return
     end
-    if candidate:IsA("Model") and hasTerm(safeName(candidate), containerTerms) then
+    if candidate:IsA("Model") and hasTerm(safeName(candidate), containerModelTerms) then
+        containerKinds[candidate] = containerKind(candidate)
         addWorldCandidate(candidate, "containers")
     end
 end
@@ -371,18 +448,18 @@ local function makeConfig()
         maxRange = session.state.playerRange,
         espRange = session.state.playerRange,
         players = { on = session.state.players },
-        box = { on = session.state.boxes, kind = session.state.boxStyle, col = Color3.fromRGB(245, 245, 245), outline = true, fill = false, mode = "static", fade = true, hpFull = Color3.fromRGB(100, 235, 160), hpLow = Color3.fromRGB(255, 105, 120) },
+        box = { on = session.state.boxes, kind = session.state.boxStyle, col = Color3.fromRGB(245, 245, 245), outline = true, fill = false, mode = "static", fade = false, hpFull = Color3.fromRGB(100, 235, 160), hpLow = Color3.fromRGB(255, 105, 120) },
         name = { on = session.state.names, size = 13 },
         dist = { on = session.state.distance, size = 11, suf = "m" },
         hp = { on = session.state.health, side = "left", text = true, pct = false },
         flags = { on = true },
         bones = { on = session.state.skeleton },
-        tracer = { on = session.state.tracers, from = "bottom" },
+        tracer = { on = session.state.playerTracers, from = "bottom" },
         arrow = { on = session.state.arrows, dist = true, fill = true },
         vis = { check = session.state.visibility, hide = session.state.hideOccluded, tint = session.state.visibilityTint, points = 3 },
         chams = { on = false },
         perf = { mode = "manual", entityStep = PERFORMANCE_LEVEL == 1 and 2 or 1, visStep = PERFORMANCE_LEVEL == 1 and 3 or 2, boxStep = 1, toolStep = 10 },
-        npc = { on = session.state.monsters, box = { on = session.state.boxes, kind = session.state.boxStyle, col = Color3.fromRGB(255, 75, 85), outline = true, mode = "static", hpFull = Color3.fromRGB(255, 170, 80), hpLow = Color3.fromRGB(255, 70, 100) }, name = { on = session.state.names, size = 13 }, dist = { on = session.state.distance, size = 11, suf = "m" }, hp = { on = session.state.health, side = "left", text = true }, flags = { on = true }, bones = { on = session.state.skeleton }, arrow = { on = session.state.arrows, dist = true }, tracer = { on = session.state.tracers }, vis = { check = session.state.visibility, hide = session.state.hideOccluded, tint = session.state.visibilityTint, points = 3 }, perf = { mode = "manual", npcBoxStep = 1, cullMax = PERFORMANCE_LEVEL == 1 and 50 or PERFORMANCE_LEVEL == 2 and 100 or 140 }, chams = { on = false } },
+        npc = { on = session.state.monsters, box = { on = session.state.boxes, kind = session.state.boxStyle, col = Color3.fromRGB(255, 75, 85), outline = true, mode = "static", hpFull = Color3.fromRGB(255, 170, 80), hpLow = Color3.fromRGB(255, 70, 100) }, name = { on = session.state.names, size = 13 }, dist = { on = session.state.distance, size = 11, suf = "m" }, hp = { on = session.state.health, side = "left", text = true }, flags = { on = true }, bones = { on = session.state.skeleton }, arrow = { on = session.state.arrows, dist = true }, tracer = { on = session.state.monsterTracers }, vis = { check = session.state.visibility, hide = session.state.hideOccluded, tint = session.state.visibilityTint, points = 3 }, perf = { mode = "manual", npcBoxStep = 1, cullMax = PERFORMANCE_LEVEL == 1 and 50 or PERFORMANCE_LEVEL == 2 and 100 or 140 }, chams = { on = false } },
     }
 end
 
@@ -392,8 +469,20 @@ esp:theme("carbon")
 esp:profile(PERFORMANCE_PROFILE)
 esp.cfg.box.col = Color3.fromRGB(245, 245, 245)
 esp.cfg.box.mode = "static"
+esp.cfg.box.fade = false
+esp.cfg.name.col = Color3.fromRGB(245, 245, 245)
+esp.cfg.dist.col = Color3.fromRGB(245, 245, 245)
+esp.cfg.tracer.col = Color3.fromRGB(245, 245, 245)
+esp.cfg.arrow.col = Color3.fromRGB(245, 245, 245)
+esp.cfg.bones.col = Color3.fromRGB(245, 245, 245)
+esp.cfg.flags.col = Color3.fromRGB(245, 245, 245)
 esp.cfg.npc.box.col = Color3.fromRGB(255, 75, 85)
 esp.cfg.npc.box.mode = "static"
+esp.cfg.npc.name.col = Color3.fromRGB(255, 75, 85)
+esp.cfg.npc.dist.col = Color3.fromRGB(255, 75, 85)
+esp.cfg.npc.tracer.col = Color3.fromRGB(255, 75, 85)
+esp.cfg.npc.arrow.col = Color3.fromRGB(255, 75, 85)
+esp.cfg.npc.bones.col = Color3.fromRGB(255, 75, 85)
 esp.cfg.perf.mode = "manual"
 esp.cfg.npc.maxRange = session.state.monsterRange
 esp.cfg.npc.espRange = session.state.monsterRange
@@ -409,13 +498,13 @@ for _, flag in ipairs({ "hp", "tool", "spd", "friend" }) do
 end
 esp:setFlagEnabled("vis", session.state.visibility)
 esp:setPlayerLabel(function(player)
-    return player.DisplayName or player.Name
+    return "PLAYER | " .. (player.DisplayName or player.Name)
 end)
 esp:setNPCSource(function()
     return session.state.monsters and cachedList(npcCache) or {}
 end)
 esp:setNPCLabel(function(model)
-    return attribute(model, "Archetype") or attribute(model, "Role") or safeName(model)
+    return "ENEMY | " .. tostring(attribute(model, "Archetype") or attribute(model, "Role") or attribute(model, "Kind") or safeName(model))
 end)
 
 local function applyVisibility(enabled)
@@ -446,20 +535,23 @@ local function contentsText(instance)
     return count > 0 and (" [" .. tostring(count) .. "]") or " [empty]"
 end
 
-local function addWorld(id, category, prefix, color, stateKey)
+local function addWorld(id, category, prefix, color, stateKey, options)
     stateKey = stateKey or category
+    options = options or {}
     worldSpecs[category] = esp:addEnt(id, {
         get = function()
-            if not session.state.world or not session.state[stateKey] then
+            if not session.state.world or not session.state[stateKey] or (options.masterState and not session.state[options.masterState]) then
                 return {}
             end
-            return cachedList(worldCaches[category])
+            return filteredList(worldCaches[category], options.filter)
         end,
         label = function(instance)
             return prefix .. " | " .. safeName(instance) .. (contentsText(instance) or "")
         end,
         col = color,
-        box = session.state.worldBoxes,
+        boxAllowed = options.box ~= false,
+        scale = options.scale or 1,
+        box = options.box ~= false and session.state.worldBoxes or false,
         name = session.state.worldNames,
         dist = session.state.worldDistance,
         tracer = session.state.worldTracers,
@@ -472,18 +564,19 @@ local function addWorld(id, category, prefix, color, stateKey)
 end
 
 addWorld("hush_vehicles", "vehicles", "VEHICLE", Color3.fromRGB(100, 200, 255))
-addWorld("hush_containers", "containers", "CONTAINER", Color3.fromRGB(255, 175, 65))
+addWorld("hush_containers", "containers", "CONTAINER", Color3.fromRGB(255, 175, 65), nil, { filter = function(instance) return containerEnabled(containerKinds[instance] or "other") end })
 addWorld("hush_bodies", "bodies", "BODY", Color3.fromRGB(220, 70, 80))
-addWorld("hush_pois", "pois", "POI", Color3.fromRGB(255, 210, 90))
-addWorld("hush_items_weapons", "itemsWeapons", "ITEM | WEAPON", Color3.fromRGB(120, 185, 255), "items")
-addWorld("hush_items_ammo", "itemsAmmo", "ITEM | AMMO", Color3.fromRGB(190, 135, 255), "items")
-addWorld("hush_items_medical", "itemsMedical", "ITEM | MEDICAL", Color3.fromRGB(110, 235, 150), "items")
-addWorld("hush_items_rare", "itemsRare", "ITEM | RARE", Color3.fromRGB(255, 220, 75), "items")
-addWorld("hush_items_misc", "itemsMisc", "ITEM | MISC", Color3.fromRGB(185, 185, 195), "items")
+addWorld("hush_mother", "mother", "MOTHER", Color3.fromRGB(255, 35, 35), nil, { scale = 0.75 })
+addWorld("hush_pois", "pois", "POI", Color3.fromRGB(255, 210, 90), nil, { box = false, scale = 0.2 })
+addWorld("hush_items_weapons", "itemsWeapons", "ITEM | WEAPON", Color3.fromRGB(120, 185, 255), "itemsWeapons", { masterState = "items" })
+addWorld("hush_items_ammo", "itemsAmmo", "ITEM | AMMO", Color3.fromRGB(190, 135, 255), "itemsAmmo", { masterState = "items" })
+addWorld("hush_items_medical", "itemsMedical", "ITEM | MEDICAL", Color3.fromRGB(110, 235, 150), "itemsMedical", { masterState = "items" })
+addWorld("hush_items_rare", "itemsRare", "ITEM | RARE", Color3.fromRGB(255, 220, 75), "itemsRare", { masterState = "items" })
+addWorld("hush_items_misc", "itemsMisc", "ITEM | MISC", Color3.fromRGB(185, 185, 195), "itemsMisc", { masterState = "items" })
 
 local function applyWorldVisuals()
     for _, spec in pairs(worldSpecs) do
-        spec.box = session.state.worldBoxes
+        spec.box = spec.boxAllowed and session.state.worldBoxes or false
         spec.name = session.state.worldNames
         spec.dist = session.state.worldDistance
         spec.tracer = session.state.worldTracers
@@ -588,10 +681,9 @@ toggle(playerGrid:Column(1), "Distance", "distance", function(enabled)
     esp.cfg.dist.on = enabled
     esp.cfg.npc.dist.on = enabled
 end, contexts.distance)
-toggle(playerGrid:Column(2), "Tracers", "tracers", function(enabled)
-    session.state.tracers = enabled
+toggle(playerGrid:Column(2), "Player tracers", "playerTracers", function(enabled)
+    session.state.playerTracers = enabled
     esp.cfg.tracer.on = enabled
-    esp.cfg.npc.tracer.on = enabled
 end, contexts.tracers)
 toggle(playerGrid:Column(1), "Skeleton", "skeleton", function(enabled)
     session.state.skeleton = enabled
@@ -645,6 +737,25 @@ toggle(worldGrid:Column(1), "Names", "worldNames", function(enabled) session.sta
 toggle(worldGrid:Column(2), "Hide occluded", "worldHideOccluded", function(enabled) session.state.worldHideOccluded = enabled; applyWorldVisuals() end)
 toggle(worldGrid:Column(2), "Distance", "worldDistance", function(enabled) session.state.worldDistance = enabled; applyWorldVisuals() end)
 toggle(worldGrid:Column(1), "Tracers", "worldTracers", function(enabled) session.state.worldTracers = enabled; applyWorldVisuals() end)
+local containerFilter = worldTab:Section("Container filters")
+local containerFilterGrid = containerFilter:Grid(2, { gap = 5 })
+toggle(containerFilterGrid:Column(1), "Drawers", "containerDrawers", function(enabled) session.state.containerDrawers = enabled end)
+toggle(containerFilterGrid:Column(2), "Fridges", "containerFridges", function(enabled) session.state.containerFridges = enabled end)
+toggle(containerFilterGrid:Column(1), "Cabinets and shelves", "containerCabinets", function(enabled) session.state.containerCabinets = enabled end)
+toggle(containerFilterGrid:Column(2), "Crates and chests", "containerCrates", function(enabled) session.state.containerCrates = enabled end)
+toggle(containerFilterGrid:Column(1), "Lockers", "containerLockers", function(enabled) session.state.containerLockers = enabled end)
+toggle(containerFilterGrid:Column(2), "Vehicle cargo", "containerVehicles", function(enabled) session.state.containerVehicles = enabled end)
+toggle(containerFilterGrid:Column(1), "Other containers", "containerOther", function(enabled) session.state.containerOther = enabled end)
+local itemSection = worldTab:Section("Floor items")
+local itemStatus = itemSection:Label("Viewing: Weapons")
+itemSection:Dropdown({ text = "View category", flag = "hush.itemCategory", options = { "Weapons", "Ammo", "Medical", "Rare", "Misc" }, default = "Weapons", callback = function(value) itemStatus:Set("Viewing: " .. tostring(value)) end })
+local itemFilterGrid = itemSection:Grid(2, { gap = 5 })
+toggle(itemFilterGrid:Column(1), "Weapons", "itemsWeapons", function(enabled) session.state.itemsWeapons = enabled end, worldContext("itemsWeapons"))
+toggle(itemFilterGrid:Column(2), "Ammo", "itemsAmmo", function(enabled) session.state.itemsAmmo = enabled end, worldContext("itemsAmmo"))
+toggle(itemFilterGrid:Column(1), "Medical", "itemsMedical", function(enabled) session.state.itemsMedical = enabled end, worldContext("itemsMedical"))
+toggle(itemFilterGrid:Column(2), "Rare and access cards", "itemsRare", function(enabled) session.state.itemsRare = enabled end, worldContext("itemsRare"))
+toggle(itemFilterGrid:Column(1), "Miscellaneous", "itemsMisc", function(enabled) session.state.itemsMisc = enabled end, worldContext("itemsMisc"))
+itemSection:Label("Verified floor-item groups: weapons, ammo, medical, rare/access cards, and miscellaneous pickups.")
 local worldStyle = worldTab:Section("Color coding")
 local worldColors = worldStyle:Grid(2, { gap = 5 })
 worldColors:Column(1):Colorpicker({ text = "Vehicle color", flag = "hush.vehicleColor", default = worldSpecs.vehicles.col, callback = function(value) worldSpecs.vehicles.col = value end })
@@ -669,10 +780,13 @@ toggle(monsterGrid:Column(2), "Boxes", "boxes", function(enabled) session.state.
 toggle(monsterGrid:Column(2), "Names", "names", function(enabled) session.state.names = enabled; esp.cfg.npc.name.on = enabled end, contexts.monsterNames)
 toggle(monsterGrid:Column(1), "Health", "health", function(enabled) session.state.health = enabled; esp.cfg.npc.hp.on = enabled end, contexts.monsterHealth)
 toggle(monsterGrid:Column(2), "Distance", "distance", function(enabled) session.state.distance = enabled; esp.cfg.npc.dist.on = enabled end, contexts.monsterDistance)
-toggle(monsterGrid:Column(1), "Tracers", "tracers", function(enabled) session.state.tracers = enabled; esp.cfg.npc.tracer.on = enabled end, contexts.monsterTracers)
+toggle(monsterGrid:Column(1), "Monster tracers", "monsterTracers", function(enabled) session.state.monsterTracers = enabled; esp.cfg.npc.tracer.on = enabled end, contexts.monsterTracers)
 toggle(monsterGrid:Column(2), "Skeleton", "skeleton", function(enabled) session.state.skeleton = enabled; esp.cfg.npc.bones.on = enabled end, contexts.monsterSkeleton)
 toggle(monsterGrid:Column(1), "Off-screen arrows", "arrows", function(enabled) session.state.arrows = enabled; esp.cfg.npc.arrow.on = enabled end, contexts.monsterArrows)
 toggle(monsterGrid:Column(2), "Visibility checks", "visibility", function(enabled) applyVisibility(enabled) end, contexts.visibility)
+local specialMonster = monstersTab:Section("Special enemies")
+local specialMonsterGrid = specialMonster:Grid(2, { gap = 5 })
+toggle(specialMonsterGrid:Column(1), "Mother", "mother", function(enabled) session.state.mother = enabled end, worldContext("mother"))
 local monsterStyle = monstersTab:Section("Appearance")
 local monsterStyleGrid = monsterStyle:Grid(2, { gap = 5 })
 monsterStyleGrid:Column(1):Dropdown({ text = "Box style", flag = "hush.monsterBoxStyle", options = { "corner", "full", "3d", "3dcorner" }, default = session.state.boxStyle, callback = function(value) esp.cfg.npc.box.kind = value end })
@@ -708,7 +822,7 @@ end))
 function session.snapshot()
     local stats = esp:getStats()
     local itemCount = #cachedList(worldCaches.itemsWeapons) + #cachedList(worldCaches.itemsAmmo) + #cachedList(worldCaches.itemsMedical) + #cachedList(worldCaches.itemsRare) + #cachedList(worldCaches.itemsMisc)
-    return "hush_esp players=" .. tostring(#Players:GetPlayers()) .. " monsters=" .. tostring(#cachedList(npcCache)) .. " drawn=" .. tostring(stats.drawn or 0) .. " entities=" .. tostring(stats.ents or 0) .. " vehicles=" .. tostring(#cachedList(worldCaches.vehicles)) .. " containers=" .. tostring(#cachedList(worldCaches.containers)) .. " bodies=" .. tostring(#cachedList(worldCaches.bodies)) .. " pois=" .. tostring(#cachedList(worldCaches.pois)) .. " items=" .. tostring(itemCount) .. " playerRange=" .. tostring(session.state.playerRange) .. " worldRange=" .. tostring(session.state.worldRange) .. " monsterRange=" .. tostring(session.state.monsterRange) .. " performance=" .. tostring(PERFORMANCE_LEVEL)
+    return "hush_esp players=" .. tostring(#Players:GetPlayers()) .. " monsters=" .. tostring(#cachedList(npcCache)) .. " drawn=" .. tostring(stats.drawn or 0) .. " entities=" .. tostring(stats.ents or 0) .. " vehicles=" .. tostring(#cachedList(worldCaches.vehicles)) .. " containers=" .. tostring(#cachedList(worldCaches.containers)) .. " bodies=" .. tostring(#cachedList(worldCaches.bodies)) .. " mother=" .. tostring(#cachedList(worldCaches.mother)) .. " pois=" .. tostring(#cachedList(worldCaches.pois)) .. " items=" .. tostring(itemCount) .. " playerRange=" .. tostring(session.state.playerRange) .. " worldRange=" .. tostring(session.state.worldRange) .. " monsterRange=" .. tostring(session.state.monsterRange) .. " performance=" .. tostring(PERFORMANCE_LEVEL)
 end
 
 function session.unload()
