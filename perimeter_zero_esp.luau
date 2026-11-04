@@ -138,6 +138,7 @@ end
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
 local Workspace = workspace
 
@@ -153,6 +154,8 @@ local session = {
     state = {
         players = true,
         bots = true,
+        playerArrows = true,
+        botArrows = false,
         playerWeapon = true,
         playerAmmo = true,
         playerState = true,
@@ -174,7 +177,14 @@ local session = {
         special = true,
         promptDisabled = false,
         detailText = true,
-        range = 3500,
+        nameMode = "display",
+        playerRange = 3500,
+        botRange = 3500,
+        dropsRange = 3500,
+        containersRange = 3500,
+        extractionsRange = 3500,
+        interactablesRange = 2500,
+        specialRange = 3500,
         performance = "balanced",
         colorMode = "team",
     },
@@ -360,8 +370,8 @@ buildCatalog()
 
 local esp = ESP.new({
     on = true,
-    maxRange = session.state.range,
-    espRange = session.state.range,
+    maxRange = session.state.playerRange,
+    espRange = session.state.playerRange,
     box = {
         on = true,
         kind = "corner",
@@ -370,7 +380,7 @@ local esp = ESP.new({
         mode = "team",
         fade = true,
     },
-    name = { on = true, user = false, size = 13 },
+    name = { on = true, user = false, mode = session.state.nameMode, size = 13 },
     dist = { on = true, size = 11, suf = "m" },
     hp = { on = true, side = "left", text = true, pct = false },
     flags = { on = true, side = "right", size = 10, gap = 1 },
@@ -378,7 +388,7 @@ local esp = ESP.new({
     head = { on = true, size = 3 },
     gaze = { on = false },
     tracer = { on = false, from = "bottom" },
-    arrow = { on = true, dist = true, fill = true },
+    arrow = { on = session.state.playerArrows, dist = true, fill = true },
     vis = { check = true, hide = false, tint = false, points = 3 },
     radar = { on = true, range = 600, names = false, max = 24 },
     list = { on = false, max = 12, hp = true, dist = true, vis = true },
@@ -395,7 +405,7 @@ local esp = ESP.new({
         flags = { on = true, side = "right", size = 10, gap = 1 },
         bones = { on = false },
         head = { on = true, size = 3 },
-        arrow = { on = true, dist = true },
+        arrow = { on = session.state.botArrows, dist = true },
         tracer = { on = false },
         vis = { check = true, hide = false, tint = false, points = 3 },
         chams = { on = false },
@@ -408,25 +418,32 @@ esp:profile(session.state.performance)
 esp.cfg.players.on = true
 esp.cfg.npc.on = true
 
-esp:setPlayerLabel(function(player)
-    return player.DisplayName or player.Name
-end)
-
 esp:setNPCSource(function()
     local result = {}
-    local bots = Workspace:FindFirstChild("IngameBots")
-    if bots then
-        for _, model in ipairs(bots:GetChildren()) do
-            if model:IsA("Model") then
-                table.insert(result, model)
+    local seen = {}
+    local function addModel(model)
+        if model:IsA("Model") and model ~= LocalPlayer.Character and not seen[model] then
+            seen[model] = true
+            table.insert(result, model)
+        end
+    end
+    for _, rootName in ipairs({ "IngameBots", "HQNpcs", "Monsters", "_Monsters", "Walkers" }) do
+        local root = Workspace:FindFirstChild(rootName)
+        if root then
+            for _, model in ipairs(root:GetChildren()) do
+                addModel(model)
             end
         end
     end
-    local hq = Workspace:FindFirstChild("HQNpcs")
-    if hq then
-        for _, model in ipairs(hq:GetChildren()) do
-            if model:IsA("Model") then
-                table.insert(result, model)
+    for _, tag in ipairs({ "Monster", "Monsters", "Walker", "MonsterTag" }) do
+        for _, model in ipairs(CollectionService:GetTagged(tag)) do
+            addModel(model)
+        end
+    end
+    if #result == 0 then
+        for _, instance in ipairs(Workspace:GetDescendants()) do
+            if instance:IsA("Model") and instance ~= LocalPlayer.Character and instance:FindFirstChildOfClass("Humanoid") and (instance:GetAttribute("Kind") ~= nil or instance:GetAttribute("Monster") == true) then
+                addModel(instance)
             end
         end
     end
@@ -635,7 +652,9 @@ local function objectForPrompt(instance)
     return nil
 end
 
-esp:addEnt("pz_drops", {
+local rangeSpecs = {}
+
+rangeSpecs.drops = esp:addEnt("pz_drops", {
     get = dropObjects,
     label = dropLabel,
     col = Color3.fromRGB(120, 255, 190),
@@ -643,7 +662,7 @@ esp:addEnt("pz_drops", {
     name = true,
     dist = true,
     dot = true,
-    max = 3500,
+    max = session.state.dropsRange,
     priority = 3,
     draw = function(e, id, object, _, x, y, w, h)
         if session.state.detailText then
@@ -656,7 +675,7 @@ esp:addEnt("pz_drops", {
     end,
 })
 
-esp:addEnt("pz_containers", {
+rangeSpecs.containers = esp:addEnt("pz_containers", {
     get = containerObjects,
     label = containerLabel,
     col = Color3.fromRGB(255, 210, 95),
@@ -664,7 +683,7 @@ esp:addEnt("pz_containers", {
     name = true,
     dist = true,
     dot = true,
-    max = 3500,
+    max = session.state.containersRange,
     priority = 2,
     draw = function(e, id, object, _, x, y, w, h)
         local status, color = containerState(object)
@@ -672,7 +691,7 @@ esp:addEnt("pz_containers", {
     end,
 })
 
-esp:addEnt("pz_extractions", {
+rangeSpecs.extractions = esp:addEnt("pz_extractions", {
     get = extractionObjects,
     label = extractionLabel,
     col = Color3.fromRGB(100, 220, 255),
@@ -680,7 +699,7 @@ esp:addEnt("pz_extractions", {
     name = true,
     dist = true,
     dot = true,
-    max = 0,
+    max = session.state.extractionsRange,
     priority = 4,
     draw = function(e, id, object, _, x, y, w, h)
         local status, color, duration = extractionState(object)
@@ -692,7 +711,7 @@ esp:addEnt("pz_extractions", {
     end,
 })
 
-esp:addEnt("pz_interactables", {
+rangeSpecs.interactables = esp:addEnt("pz_interactables", {
     get = promptObjects,
     label = function(object)
         local prompt = objectForPrompt(object)
@@ -703,11 +722,11 @@ esp:addEnt("pz_interactables", {
     name = true,
     dist = true,
     dot = true,
-    max = 2500,
+    max = session.state.interactablesRange,
     priority = 2,
 })
 
-esp:addEnt("pz_special", {
+rangeSpecs.special = esp:addEnt("pz_special", {
     get = specialObjects,
     label = specialLabel,
     col = Color3.fromRGB(255, 120, 120),
@@ -715,7 +734,7 @@ esp:addEnt("pz_special", {
     name = true,
     dist = true,
     dot = true,
-    max = 3500,
+    max = session.state.specialRange,
     priority = 3,
 })
 
@@ -776,13 +795,51 @@ local UIInstance = UI.new({
 })
 session.ui = UIInstance
 
-local function bindToggle(section, text, flag, default, callback)
+local function bindToggle(section, text, flag, default, callback, context)
     return section:Toggle({
         text = text,
         flag = "pz." .. flag,
         default = default,
         callback = callback,
+        context = context,
     })
+end
+
+local function rangeContext(text, get, set)
+    return function()
+        return {
+            {
+                kind = "slider",
+                text = text,
+                min = 250,
+                max = 6000,
+                step = 250,
+                decimals = 0,
+                suffix = "m",
+                get = get,
+                set = set,
+            },
+        }
+    end
+end
+
+local function setRange(key, value)
+    session.state[key] = value
+    if rangeSpecs[key] then
+        rangeSpecs[key].max = value
+    end
+end
+
+local function playerRangeSet(value)
+    setRange("playerRange", value)
+    esp.cfg.maxRange = value
+    esp.cfg.espRange = value
+end
+
+local function botRangeSet(value)
+    setRange("botRange", value)
+    esp.cfg.npc.maxRange = value
+    esp.cfg.npc.espRange = value
 end
 
 local playersWindow = UIInstance:Window("Players", { x = 30, y = 70, width = 300, height = 410 })
@@ -790,11 +847,15 @@ local playerSection = playersWindow:Tab("ESP"):Section("Live targets")
 bindToggle(playerSection, "Players", "players", session.state.players, function(value)
     session.state.players = value
     esp.cfg.players.on = value
-end)
+end, rangeContext("Player range", function()
+    return session.state.playerRange
+end, playerRangeSet))
 bindToggle(playerSection, "Bots / NPCs", "bots", session.state.bots, function(value)
     session.state.bots = value
     esp.cfg.npc.on = value
-end)
+end, rangeContext("Bot range", function()
+    return session.state.botRange
+end, botRangeSet))
 bindToggle(playerSection, "Boxes", "boxes", session.state.boxes, function(value)
     session.state.boxes = value
     esp.cfg.box.on = value
@@ -841,9 +902,12 @@ bindToggle(playerSection, "Tracers", "tracers", session.state.tracers, function(
     esp.cfg.tracer.on = value
     esp.cfg.npc.tracer.on = value
 end)
-bindToggle(playerSection, "Off-screen arrows", "arrows", session.state.arrows, function(value)
-    session.state.arrows = value
+bindToggle(playerSection, "Player off-screen arrows", "playerArrows", session.state.playerArrows, function(value)
+    session.state.playerArrows = value
     esp.cfg.arrow.on = value
+end)
+bindToggle(playerSection, "Bot off-screen arrows", "botArrows", session.state.botArrows, function(value)
+    session.state.botArrows = value
     esp.cfg.npc.arrow.on = value
 end)
 bindToggle(playerSection, "Visibility checks", "visibility", session.state.visibility, function(value)
@@ -856,6 +920,16 @@ bindToggle(playerSection, "Highlight chams", "chams", session.state.chams, funct
     esp.cfg.chams.on = value
     esp.cfg.npc.chams.on = value
 end)
+playerSection:Dropdown({
+    text = "Player name",
+    flag = "pz.nameMode",
+    options = { "display", "username", "both" },
+    default = session.state.nameMode,
+    callback = function(value)
+        session.state.nameMode = value
+        esp.cfg.name.mode = value
+    end,
+})
 playerSection:Dropdown({
     text = "Box style",
     flag = "pz.boxKind",
@@ -886,49 +960,55 @@ playerSection:Dropdown({
         esp:profile(value)
     end,
 })
-playerSection:Slider({
-    text = "ESP range",
-    flag = "pz.range",
-    min = 500,
-    max = 6000,
-    step = 100,
-    decimals = 0,
-    default = session.state.range,
-    suffix = "m",
-    callback = function(value)
-        session.state.range = value
-        esp.cfg.maxRange = value
-        esp.cfg.espRange = value
-    end,
-})
+playerSection:Label("Right-click any option for its range, keybind, and control menu.")
 
 local worldWindow = UIInstance:Window("World", { x = 350, y = 70, width = 330, height = 350 })
 local worldSection = worldWindow:Tab("World ESP"):Section("Raid objects")
 bindToggle(worldSection, "Dropped items", "drops", session.state.drops, function(value)
     session.state.drops = value
-end)
+end, rangeContext("Drop range", function()
+    return session.state.dropsRange
+end, function(value)
+    setRange("dropsRange", value)
+end))
 bindToggle(worldSection, "Containers / corpses", "containers", session.state.containers, function(value)
     session.state.containers = value
-end)
+end, rangeContext("Container range", function()
+    return session.state.containersRange
+end, function(value)
+    setRange("containersRange", value)
+end))
 bindToggle(worldSection, "Extraction points", "extractions", session.state.extractions, function(value)
     session.state.extractions = value
-end)
+end, rangeContext("Extraction range", function()
+    return session.state.extractionsRange
+end, function(value)
+    setRange("extractionsRange", value)
+end))
 bindToggle(worldSection, "Nearest extraction HUD", "extractHud", session.state.extractHud, function(value)
     session.state.extractHud = value
 end)
 bindToggle(worldSection, "Interactables", "interactables", session.state.interactables, function(value)
     session.state.interactables = value
-end)
+end, rangeContext("Interactable range", function()
+    return session.state.interactablesRange
+end, function(value)
+    setRange("interactablesRange", value)
+end))
 bindToggle(worldSection, "Radiation / airdrop / locked rooms", "special", session.state.special, function(value)
     session.state.special = value
-end)
+end, rangeContext("Special-object range", function()
+    return session.state.specialRange
+end, function(value)
+    setRange("specialRange", value)
+end))
 bindToggle(worldSection, "Show disabled prompts", "promptDisabled", session.state.promptDisabled, function(value)
     session.state.promptDisabled = value
 end)
 bindToggle(worldSection, "Detail text", "detailText", session.state.detailText, function(value)
     session.state.detailText = value
 end)
-worldSection:Label("Extractions show state, requirement, distance, and time.")
+worldSection:Label("Right-click any option for its range, keybind, and control menu.")
 worldSection:Label("Loot labels use the game's ToolsStorage catalog.")
 
 local statusWindow = UIInstance:Window("Status", { x = 710, y = 70, width = 300, height = 230 })

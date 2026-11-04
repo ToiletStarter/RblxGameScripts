@@ -119,6 +119,7 @@ end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
 local ESP = loadLibrary("easyesp/EasyESP.luau")
 local UI = loadLibrary("easyui/EasyUi_style_2.luau")
@@ -217,7 +218,18 @@ local function isMotherCandidate(candidate)
 end
 
 local function isMonsterCandidate(candidate)
-    return candidate:IsA("Model") and (pathHas(candidate, ".monsters.") or pathHas(candidate, ".walkers.") or attribute(candidate, "Kind") ~= nil)
+    if not candidate:IsA("Model") then
+        return false
+    end
+    local tagged = false
+    for _, tag in ipairs({ "Monster", "Monsters", "Walker", "MonsterTag" }) do
+        local ok, hasTag = pcall(CollectionService.HasTag, CollectionService, candidate, tag)
+        if ok and hasTag then
+            tagged = true
+            break
+        end
+    end
+    return tagged or pathHas(candidate, ".monsters.") or pathHas(candidate, ".walkers.") or pathHas(candidate, "._monsters.") or attribute(candidate, "Kind") ~= nil
 end
 
 local function isVehicleCandidate(candidate)
@@ -387,7 +399,7 @@ end
 
 local function addNpcCandidate(instance)
     local model = candidateFor(instance)
-    if not model or not model.Parent or model == LocalPlayer.Character or isPlayerCharacter(model) or not model:IsA("Model") then
+    if not model or not model.Parent or not model:IsA("Model") then
         return
     end
     if not isMonsterCandidate(model) then
@@ -409,6 +421,13 @@ end
 
 local function inspectNpcInstance(instance)
     if instance:IsA("Model") then
+        addNpcCandidate(instance)
+    end
+end
+
+for _, tag in ipairs({ "Monster", "Monsters", "Walker", "MonsterTag" }) do
+    track(CollectionService:GetInstanceAddedSignal(tag):Connect(addNpcCandidate))
+    for _, instance in ipairs(CollectionService:GetTagged(tag)) do
         addNpcCandidate(instance)
     end
 end

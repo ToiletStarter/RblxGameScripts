@@ -392,6 +392,8 @@ local function defaults()
             walker = 4,
             entity = 2,
             hud = 9,
+            distance = 10,
+            distanceMax = 10000,
         },
         team = false,
         rainbow = false,
@@ -443,6 +445,7 @@ local function defaults()
         name = {
             on = true,
             user = false,
+            mode = "display",
             size = 13,
             col = p.text,
         },
@@ -723,6 +726,7 @@ local DESCRIPTORS = {
 
     desc("hp.on", "toggle", "Health Bar", { window = "Visuals", tab = "Labels", section = "Bars", order = 90, default = pathGet(DESCRIPTOR_DEFAULTS, "hp.on") }),
     desc("name.on", "toggle", "Name", { window = "Visuals", tab = "Labels", section = "Text", order = 100, default = pathGet(DESCRIPTOR_DEFAULTS, "name.on") }),
+    desc("name.mode", "dropdown", "Name Mode", { window = "Visuals", tab = "Labels", section = "Text", order = 105, items = { "display", "username", "both" }, default = pathGet(DESCRIPTOR_DEFAULTS, "name.mode") }),
     desc("dist.on", "toggle", "Distance", { window = "Visuals", tab = "Labels", section = "Text", order = 110, default = pathGet(DESCRIPTOR_DEFAULTS, "dist.on") }),
     desc("flags.on", "toggle", "Flags", { window = "Visuals", tab = "Labels", section = "Text", order = 120, default = pathGet(DESCRIPTOR_DEFAULTS, "flags.on") }),
     desc("bones.on", "toggle", "Bones", { window = "Visuals", tab = "Extras", section = "ESP", order = 130, default = pathGet(DESCRIPTOR_DEFAULTS, "bones.on") }),
@@ -1727,7 +1731,7 @@ function ESP:_snap()
 
     if #out > 1 then
         sort(out, function(a, b)
-            return a.dist < b.dist
+            return a.dist > b.dist
         end)
     end
 
@@ -1865,6 +1869,16 @@ function ESP:_fade(s)
         return 1
     end
     return 1 - clamp((s.dist - b.fade0) / max(b.fade1 - b.fade0, 1), 0, 0.85)
+end
+
+function ESP:_priorityZ(dist, category)
+    local priority = self.cfg.priority or {}
+    local distanceMax = tonumber(priority.distanceMax) or 10000
+    local distanceScale = tonumber(priority.distance) or 10
+    local categoryScale = tonumber(priority.scale) or 100
+    local categoryValue = type(category) == "number" and category or tonumber(priority[category]) or 0
+    local closeness = max(0, distanceMax - min(tonumber(dist) or distanceMax, distanceMax))
+    return floor(closeness * distanceScale + categoryValue * categoryScale)
 end
 
 function ESP:_markHit(r, dmg)
@@ -2087,10 +2101,11 @@ function ESP:_nameDraw(s, c, a)
         end
     end
     if not txt and s.plr then
-        if n.user and n.on then
-            txt = s.plr.DisplayName .. " (" .. s.plr.Name .. ")"
-        elseif n.user then
+        local mode = n.mode
+        if mode == "username" then
             txt = s.plr.Name
+        elseif mode == "both" or n.user then
+            txt = s.plr.DisplayName .. " (" .. s.plr.Name .. ")"
         else
             txt = s.plr.DisplayName
         end
@@ -2217,6 +2232,13 @@ end
 function ESP:_arrow(s)
     local root = s.cfg or self.cfg
     local cfg = root.arrow
+    if s.npc then
+        if not self.cfg.npc or not self.cfg.npc.arrow.on then
+            return
+        end
+    elseif not self.cfg.arrow.on then
+        return
+    end
     if not cfg.on or not cam then
         return
     end
@@ -2633,6 +2655,22 @@ function ESP:_ents()
     local eye = cam.CFrame.Position
     local vp = cam.ViewportSize
 
+    local function positionOf(obj)
+        local kind = typeof(obj)
+        if kind == "Vector3" then
+            return obj
+        end
+        if kind == "Instance" then
+            if obj:IsA("BasePart") then
+                return obj.Position
+            end
+            if obj:IsA("Model") then
+                local pivot = obj:GetBoundingBox()
+                return pivot.Position
+            end
+        end
+    end
+
     local function drawOne(id, e, obj)
         local pos, size, pivot
         local kind = typeof(obj)
@@ -2705,19 +2743,32 @@ function ESP:_ents()
         end
     end
 
-    local pri = self.cfg.priority
+    local ordered = {}
     for id, e in pairs(self.ents) do
-        self.pool.zbias = pri and ((e.priority or pri.entity or 1) * (pri.scale or 100)) or 0
         local ok, obj = pcall(e.get)
         if ok and obj then
             if typeof(obj) == "table" then
                 for i = 1, #obj do
-                    drawOne(id .. "_" .. i, e, obj[i])
+                    local item = obj[i]
+                    local pos = positionOf(item)
+                    if pos then
+                        ordered[#ordered + 1] = { id = id .. "_" .. i, spec = e, obj = item, dist = (eye - pos).Magnitude }
+                    end
                 end
             else
-                drawOne(id, e, obj)
+                local pos = positionOf(obj)
+                if pos then
+                    ordered[#ordered + 1] = { id = id, spec = e, obj = obj, dist = (eye - pos).Magnitude }
+                end
             end
         end
+    end
+    sort(ordered, function(a, b)
+        return a.dist > b.dist
+    end)
+    for _, item in ipairs(ordered) do
+        self.pool.zbias = self:_priorityZ(item.dist, item.spec.priority or "entity")
+        drawOne(item.id, item.spec, item.obj)
     end
     self.pool.zbias = 0
 end
@@ -2961,14 +3012,17 @@ function ESP:tick(dt)
 
     for i = 1, #self.snap do
         local s = self.snap[i]
-        self.pool.zbias = pri and ((s.npc and (pri.walker or 4) or (pri.player or 5)) * scale) or 0
+        self.pool.zbias = self:_priorityZ(s.dist, s.npc and "walker" or "player")
         self:_player(s)
     end
 
     self.pool.zbias = pri and ((pri.hud or 9) * scale) or 0
     if self.cfg.arrow.on or self.cfg.npc.arrow.on then
         for i = 1, #self.snap do
-            self:_arrow(self.snap[i])
+            local s = self.snap[i]
+            if (s.npc and self.cfg.npc.arrow.on) or (not s.npc and self.cfg.arrow.on) then
+                self:_arrow(s)
+            end
         end
     end
 

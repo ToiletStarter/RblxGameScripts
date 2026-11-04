@@ -183,8 +183,8 @@ local function screenGui(name)
         Name = name,
         ResetOnSpawn = false,
         IgnoreGuiInset = true,
-        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-        DisplayOrder = 9999,
+        ZIndexBehavior = Enum.ZIndexBehavior.Global,
+        DisplayOrder = 2147483647,
     })
     if syn and syn.protect_gui then
         pcall(syn.protect_gui, gui)
@@ -203,9 +203,16 @@ function Widget.new(owner, kind, frame, opts)
         frame = frame,
         opts = opts or {},
         flag = opts and opts.flag,
+        keybind = opts and opts.keybind,
     }, Widget)
-    if widget.opts.context and owner.ui and owner.ui._bindContext then
+    pcall(function()
+        frame.Active = true
+    end)
+    if owner.ui and owner.ui._bindContext and widget.opts.context ~= false and kind ~= "label" and kind ~= "divider" and kind ~= "badge" then
         owner.ui:_bindContext(widget, frame, widget.opts.context)
+        if widget.keybind then
+            owner.ui:_setWidgetKeybind(widget, widget.keybind)
+        end
     end
     return widget
 end
@@ -224,7 +231,58 @@ function Widget:Get()
     return self.value
 end
 
+function Widget:Activate()
+    if self._activate then
+        return self._activate()
+    end
+    if self.kind == "toggle" then
+        return self:Set(not self:Get())
+    end
+    if self.kind == "slider" then
+        local step = tonumber(self.opts.step) or 1
+        local minv = tonumber(self.opts.min) or 0
+        local maxv = tonumber(self.opts.max) or 100
+        local nextValue = self:Get() + step
+        if nextValue > maxv then
+            nextValue = minv
+        end
+        return self:Set(nextValue)
+    end
+    if self.kind == "dropdown" then
+        local options = self.opts.options or {}
+        for index, option in ipairs(options) do
+            if option == self:Get() then
+                return self:Set(options[index % #options + 1])
+            end
+        end
+        return options[1] and self:Set(options[1])
+    end
+    if self.kind == "button" and self.opts.callback then
+        return task.spawn(self.opts.callback)
+    end
+    if self.opts.keybindCallback then
+        return task.spawn(self.opts.keybindCallback, self)
+    end
+end
+
+function Widget:SetKeybind(binding)
+    if self.owner and self.owner.ui then
+        self.owner.ui:_setWidgetKeybind(self, binding)
+    end
+    return self
+end
+
+function Widget:GetKeybind()
+    return self.keybind
+end
+
 function Widget:Destroy()
+    if self._keyConnection then
+        pcall(function()
+            self._keyConnection:Disconnect()
+        end)
+        self._keyConnection = nil
+    end
     if self.frame then
         self.frame:Destroy()
     end
@@ -913,6 +971,9 @@ function Section:Textbox(opts)
     pad(box, 0, { PaddingLeft = 7, PaddingRight = 7 })
 
     local w = Widget.new(self, "textbox", row, opts)
+    w._activate = function()
+        box:CaptureFocus()
+    end
     w._get = function()
         return box.Text
     end
@@ -1347,6 +1408,133 @@ function Window:Destroy()
     self.frame:Destroy()
 end
 
+function UI:_setWidgetKeybind(widget, binding)
+    widget.keybind = binding
+    if widget._keyConnection then
+        pcall(function()
+            widget._keyConnection:Disconnect()
+        end)
+        widget._keyConnection = nil
+    end
+    if binding then
+        widget._keyConnection = self:_connect(UserInputService.InputBegan, function(input, gpe)
+            if gpe or not widget.keybind or not bindingMatches(widget.keybind, input) then
+                return
+            end
+            widget:Activate()
+        end)
+    end
+    return binding
+end
+
+function UI:_defaultContext(widget)
+    local entries = {}
+    local opts = widget.opts or {}
+    if widget.kind == "toggle" then
+        entries[#entries + 1] = {
+            kind = "toggle",
+            text = "Toggle",
+            get = function()
+                return widget:Get()
+            end,
+            set = function(value)
+                widget:Set(value)
+            end,
+        }
+    elseif widget.kind == "slider" then
+        entries[#entries + 1] = {
+            kind = "slider",
+            text = "Value",
+            min = opts.min or 0,
+            max = opts.max or 100,
+            step = opts.step or 1,
+            decimals = opts.decimals or 0,
+            suffix = opts.suffix,
+            get = function()
+                return widget:Get()
+            end,
+            set = function(value)
+                widget:Set(value)
+            end,
+        }
+    elseif widget.kind == "dropdown" then
+        entries[#entries + 1] = {
+            kind = "dropdown",
+            text = "Value",
+            options = opts.options or {},
+            get = function()
+                return widget:Get()
+            end,
+            set = function(value)
+                widget:Set(value)
+            end,
+        }
+    elseif widget.kind == "textbox" then
+        entries[#entries + 1] = {
+            kind = "textbox",
+            text = "Value",
+            get = function()
+                return widget:Get()
+            end,
+            set = function(value)
+                widget:Set(value)
+            end,
+        }
+    elseif widget.kind == "button" then
+        entries[#entries + 1] = {
+            kind = "button",
+            text = "Activate",
+            set = function()
+                widget:Activate()
+            end,
+        }
+    end
+    if widget.kind ~= "keybind" then
+        entries[#entries + 1] = {
+            kind = "keybind",
+            text = "Set keybind",
+            get = function()
+                return widget:GetKeybind()
+            end,
+            set = function(value)
+                widget:SetKeybind(value)
+            end,
+        }
+    end
+    if opts.default ~= nil and widget.kind ~= "button" then
+        entries[#entries + 1] = {
+            kind = "reset",
+            text = "Reset",
+            set = function()
+                widget:Set(opts.default)
+            end,
+        }
+    end
+    return entries
+end
+
+function UI:_contextEntries(widget, custom)
+    local entries = self:_defaultContext(widget)
+    if custom then
+        local ok, extra = pcall(function()
+            return type(custom) == "function" and custom(widget, self) or custom
+        end)
+        if ok and type(extra) == "table" then
+            for _, entry in ipairs(extra) do
+                entries[#entries + 1] = entry
+            end
+        end
+    end
+    return entries
+end
+
+function UI:_contextConnect(signal, fn)
+    self._contextConns = self._contextConns or {}
+    local connection = signal:Connect(fn)
+    self._contextConns[#self._contextConns + 1] = connection
+    return connection
+end
+
 function UI:_closeContext()
     if self._contextInput then
         pcall(function()
@@ -1354,6 +1542,22 @@ function UI:_closeContext()
         end)
         self._contextInput = nil
     end
+    if self._contextKeyInput then
+        pcall(function()
+            self._contextKeyInput:Disconnect()
+        end)
+        self._contextKeyInput = nil
+    end
+    if self._contextSubPopup then
+        self._contextSubPopup:Destroy()
+        self._contextSubPopup = nil
+    end
+    for _, connection in ipairs(self._contextConns or {}) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    self._contextConns = {}
     if self._contextPopup then
         self._contextPopup:Destroy()
         self._contextPopup = nil
@@ -1371,50 +1575,173 @@ end
 function UI:_showContext(widget, builder)
     self:_closeContext()
     local ok, entries = pcall(function()
-        return type(builder) == "function" and builder(widget, self) or builder
+        return self:_contextEntries(widget, builder)
     end)
     if not ok or type(entries) ~= "table" or #entries == 0 then
         return
     end
     local mouse = UserInputService:GetMouseLocation()
-    local height = 14 + #entries * 30
     local camera = workspace.CurrentCamera
     local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
-    local x = math.clamp(mouse.X, 4, math.max(4, viewport.X - 224))
-    local y = math.clamp(mouse.Y, 4, math.max(4, viewport.Y - height - 4))
+    local height = 10
+    for _, entry in ipairs(entries) do
+        local kind = type(entry) == "table" and entry.kind or "button"
+        local entryHeight = 26
+        if kind == "slider" or kind == "range" then
+            entryHeight = 46
+        elseif kind == "textbox" or kind == "input" then
+            entryHeight = 32
+        end
+        height = height + entryHeight + 3
+    end
+    local shownHeight = math.min(height, math.max(120, viewport.Y - 16))
+    local x = math.clamp(mouse.X, 4, math.max(4, viewport.X - 268))
+    local y = math.clamp(mouse.Y, 4, math.max(4, viewport.Y - shownHeight - 4))
     local menu = create("Frame", {
         Name = "ContextMenu",
         BackgroundColor3 = Theme.Panel,
         BackgroundTransparency = 0.02,
         Position = UDim2.fromOffset(x, y),
-        Size = UDim2.fromOffset(220, height),
+        Size = UDim2.fromOffset(264, shownHeight),
         BorderSizePixel = 0,
         ClipsDescendants = true,
+        Active = true,
         ZIndex = 100,
         Parent = self.gui,
     })
     corner(menu, 8)
     stroke(menu, Theme.Stroke, 1, 0.1)
-    pad(menu, 5)
-    list(menu, 3)
+    local scroll = create("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.Stroke,
+        BorderSizePixel = 0,
+        Active = true,
+        ZIndex = 101,
+        Parent = menu,
+    })
+    pad(scroll, 5)
+    list(scroll, 3)
     self._contextPopup = menu
-    local function reopen()
-        if menu.Parent then
-            self:_showContext(widget, builder)
+    local function valueOf(entry)
+        if entry.get then
+            local got, value = pcall(entry.get, widget, self)
+            if got then
+                return value
+            end
+        end
+    end
+    local function setValue(entry, value, supplied)
+        if entry.set then
+            if supplied then
+                pcall(entry.set, value, widget, self)
+            else
+                pcall(entry.set, widget, self)
+            end
+        elseif entry.callback then
+            pcall(entry.callback, widget, self)
+        end
+    end
+    local function round(value, decimals)
+        local mult = 10 ^ (decimals or 0)
+        return math.floor(value * mult + 0.5) / mult
+    end
+    local function showDropdown(entry, anchor, refresh)
+        if self._contextSubPopup then
+            self._contextSubPopup:Destroy()
+            self._contextSubPopup = nil
+        end
+        local options = entry.options or {}
+        if #options == 0 then
+            return
+        end
+        local subHeight = math.min(#options * 25 + 8, math.max(80, viewport.Y - 16))
+        local pos = anchor.AbsolutePosition
+        local subX = pos.X + anchor.AbsoluteSize.X + 5
+        if subX + 150 > viewport.X then
+            subX = pos.X - 155
+        end
+        local subY = math.clamp(pos.Y, 4, math.max(4, viewport.Y - subHeight - 4))
+        local sub = create("Frame", {
+            Name = "ContextDropdown",
+            BackgroundColor3 = Theme.Panel,
+            BackgroundTransparency = 0.02,
+            Position = UDim2.fromOffset(subX, subY),
+            Size = UDim2.fromOffset(150, subHeight),
+            BorderSizePixel = 0,
+            ClipsDescendants = true,
+            Active = true,
+            ZIndex = 140,
+            Parent = self.gui,
+        })
+        corner(sub, 8)
+        stroke(sub, Theme.Stroke, 1, 0.1)
+        local subScroll = create("ScrollingFrame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            CanvasSize = UDim2.new(),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollBarThickness = 2,
+            ScrollBarImageColor3 = Theme.Stroke,
+            BorderSizePixel = 0,
+            Active = true,
+            ZIndex = 141,
+            Parent = sub,
+        })
+        pad(subScroll, 4)
+        list(subScroll, 3)
+        self._contextSubPopup = sub
+        for index, option in ipairs(options) do
+            local item = create("TextButton", {
+                BackgroundColor3 = Theme.Control,
+                BackgroundTransparency = option == valueOf(entry) and 0 or 0.15,
+                Size = UDim2.new(1, 0, 0, 22),
+                Font = Theme.Font,
+                Text = tostring(option),
+                TextSize = 10,
+                TextColor3 = option == valueOf(entry) and self.accent or Theme.Text,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                AutoButtonColor = false,
+                LayoutOrder = index,
+                ZIndex = 142,
+                Parent = subScroll,
+            })
+            corner(item, 5)
+            pad(item, 0, { PaddingLeft = 7, PaddingRight = 7 })
+            item.MouseEnter:Connect(function()
+                tween(item, QUICK, { BackgroundColor3 = Theme.Hover })
+            end)
+            item.MouseLeave:Connect(function()
+                tween(item, QUICK, { BackgroundColor3 = option == valueOf(entry) and Theme.Control or Theme.Control })
+            end)
+            item.MouseButton1Click:Connect(function()
+                setValue(entry, option, true)
+                if refresh then
+                    refresh()
+                end
+                sub:Destroy()
+                self._contextSubPopup = nil
+            end)
         end
     end
     for index, entry in ipairs(entries) do
-        if type(entry) == "table" and entry.kind == "color" and type(entry.colors) == "table" then
+        entry = type(entry) == "table" and entry or { kind = "button", text = tostring(entry) }
+        local kind = entry.kind or "button"
+        if kind == "color" and type(entry.colors) == "table" then
             local row = create("Frame", {
                 BackgroundColor3 = Theme.Control,
                 BackgroundTransparency = 0.15,
                 Size = UDim2.new(1, 0, 0, 26),
                 LayoutOrder = index,
-                ZIndex = 101,
-                Parent = menu,
+                Active = true,
+                ZIndex = 102,
+                Parent = scroll,
             })
             corner(row, 5)
-            local label = create("TextLabel", {
+            create("TextLabel", {
                 BackgroundTransparency = 1,
                 Position = UDim2.fromOffset(7, 0),
                 Size = UDim2.new(0.48, 0, 1, 0),
@@ -1423,7 +1750,7 @@ function UI:_showContext(widget, builder)
                 TextSize = 10,
                 TextColor3 = Theme.Sub,
                 TextXAlignment = Enum.TextXAlignment.Left,
-                ZIndex = 102,
+                ZIndex = 103,
                 Parent = row,
             })
             for colorIndex, colorEntry in ipairs(entry.colors) do
@@ -1435,18 +1762,220 @@ function UI:_showContext(widget, builder)
                     Size = UDim2.fromOffset(16, 16),
                     Text = "",
                     AutoButtonColor = false,
-                    ZIndex = 103,
+                    ZIndex = 104,
                     Parent = row,
                 })
                 swatch.Name = name
                 corner(swatch, 4)
                 swatch.MouseButton1Click:Connect(function()
-                    if entry.set then
-                        pcall(entry.set, color, widget, self)
-                    end
-                    reopen()
+                    setValue(entry, color, true)
                 end)
             end
+        elseif kind == "slider" or kind == "range" then
+            local row = create("Frame", {
+                BackgroundColor3 = Theme.Control,
+                BackgroundTransparency = 0.15,
+                Size = UDim2.new(1, 0, 0, 46),
+                LayoutOrder = index,
+                Active = true,
+                ZIndex = 102,
+                Parent = scroll,
+            })
+            corner(row, 5)
+            local label = create("TextLabel", {
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(7, 2),
+                Size = UDim2.new(1, -76, 0, 14),
+                Font = Theme.Font,
+                Text = tostring(entry.text or "Value"),
+                TextSize = 10,
+                TextColor3 = Theme.Text,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 103,
+                Parent = row,
+            })
+            local minv = tonumber(entry.min) or 0
+            local maxv = tonumber(entry.max) or 100
+            local decimals = tonumber(entry.decimals) or 0
+            local readout = create("TextLabel", {
+                BackgroundTransparency = 1,
+                Position = UDim2.new(1, -68, 0, 2),
+                Size = UDim2.fromOffset(60, 14),
+                Font = Theme.Mono,
+                Text = "",
+                TextSize = 10,
+                TextColor3 = Theme.Sub,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                ZIndex = 103,
+                Parent = row,
+            })
+            local track = create("Frame", {
+                Position = UDim2.new(0, 8, 0, 29),
+                Size = UDim2.new(1, -16, 0, 4),
+                BackgroundColor3 = Theme.Hover,
+                BorderSizePixel = 0,
+                ZIndex = 103,
+                Parent = row,
+            })
+            corner(track, 999)
+            local fill = create("Frame", {
+                Size = UDim2.fromScale(0, 1),
+                BackgroundColor3 = self.accent,
+                BorderSizePixel = 0,
+                ZIndex = 104,
+                Parent = track,
+            })
+            corner(fill, 999)
+            local knob = create("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.fromScale(0, 0.5),
+                Size = UDim2.fromOffset(10, 10),
+                BackgroundColor3 = Color3.new(1, 1, 1),
+                BorderSizePixel = 0,
+                ZIndex = 105,
+                Parent = track,
+            })
+            corner(knob, 999)
+            local function paint()
+                local value = tonumber(valueOf(entry)) or minv
+                local alpha = math.clamp((value - minv) / math.max(maxv - minv, 1e-6), 0, 1)
+                fill.Size = UDim2.fromScale(alpha, 1)
+                knob.Position = UDim2.fromScale(alpha, 0.5)
+                readout.Text = tostring(round(value, decimals)) .. tostring(entry.suffix or "")
+            end
+            local hit = create("TextButton", {
+                BackgroundTransparency = 1,
+                Position = UDim2.new(0, 4, 0, 20),
+                Size = UDim2.new(1, -8, 0, 18),
+                Text = "",
+                AutoButtonColor = false,
+                ZIndex = 106,
+                Parent = row,
+            })
+            local dragging = false
+            local function apply(x)
+                local alpha = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+                local step = tonumber(entry.step) or 1
+                local value = minv + alpha * (maxv - minv)
+                value = math.floor((value - minv) / step + 0.5) * step + minv
+                setValue(entry, math.clamp(round(value, decimals), minv, maxv), true)
+                paint()
+            end
+            hit.MouseButton1Down:Connect(function()
+                dragging = true
+                apply(UserInputService:GetMouseLocation().X)
+            end)
+            self:_contextConnect(UserInputService.InputChanged, function(input)
+                if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                    apply(UserInputService:GetMouseLocation().X)
+                end
+            end)
+            self:_contextConnect(UserInputService.InputEnded, function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    dragging = false
+                end
+            end)
+            paint()
+        elseif kind == "textbox" or kind == "input" then
+            local row = create("Frame", {
+                BackgroundColor3 = Theme.Control,
+                BackgroundTransparency = 0.15,
+                Size = UDim2.new(1, 0, 0, 32),
+                LayoutOrder = index,
+                Active = true,
+                ZIndex = 102,
+                Parent = scroll,
+            })
+            corner(row, 5)
+            create("TextLabel", {
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(7, 0),
+                Size = UDim2.new(0.42, 0, 1, 0),
+                Font = Theme.Font,
+                Text = tostring(entry.text or "Input"),
+                TextSize = 10,
+                TextColor3 = Theme.Sub,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 103,
+                Parent = row,
+            })
+            local box = create("TextBox", {
+                AnchorPoint = Vector2.new(1, 0.5),
+                Position = UDim2.new(1, -7, 0.5, 0),
+                Size = UDim2.new(0.54, -7, 0, 22),
+                BackgroundColor3 = Theme.Hover,
+                Font = Theme.Font,
+                Text = tostring(valueOf(entry) or ""),
+                PlaceholderText = tostring(entry.placeholder or ""),
+                TextSize = 10,
+                TextColor3 = Theme.Text,
+                PlaceholderColor3 = Theme.Muted,
+                ClearTextOnFocus = false,
+                ZIndex = 104,
+                Parent = row,
+            })
+            corner(box, 5)
+            pad(box, 0, { PaddingLeft = 6, PaddingRight = 6 })
+            box.FocusLost:Connect(function()
+                setValue(entry, box.Text, true)
+            end)
+        elseif kind == "dropdown" then
+            local row = create("Frame", {
+                BackgroundColor3 = Theme.Control,
+                BackgroundTransparency = 0.15,
+                Size = UDim2.new(1, 0, 0, 26),
+                LayoutOrder = index,
+                Active = true,
+                ZIndex = 102,
+                Parent = scroll,
+            })
+            corner(row, 5)
+            create("TextLabel", {
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(7, 0),
+                Size = UDim2.new(0.42, 0, 1, 0),
+                Font = Theme.Font,
+                Text = tostring(entry.text or "Value"),
+                TextSize = 10,
+                TextColor3 = Theme.Sub,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 103,
+                Parent = row,
+            })
+            local picker = create("TextButton", {
+                AnchorPoint = Vector2.new(1, 0.5),
+                Position = UDim2.new(1, -7, 0.5, 0),
+                Size = UDim2.new(0.54, -7, 0, 21),
+                BackgroundColor3 = Theme.Hover,
+                Font = Theme.Medium,
+                Text = tostring(valueOf(entry) or "-"),
+                TextSize = 10,
+                TextColor3 = Theme.Text,
+                AutoButtonColor = false,
+                ZIndex = 104,
+                Parent = row,
+            })
+            corner(picker, 5)
+            picker.MouseButton1Click:Connect(function()
+                showDropdown(entry, row, function()
+                    picker.Text = tostring(valueOf(entry) or "-")
+                end)
+            end)
+        elseif kind == "label" or kind == "note" then
+            local label = create("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, 24),
+                LayoutOrder = index,
+                Font = Theme.Font,
+                Text = tostring(entry.text or ""),
+                TextSize = 10,
+                TextColor3 = Theme.Sub,
+                TextWrapped = true,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 102,
+                Parent = scroll,
+            })
+            label.AutomaticSize = Enum.AutomaticSize.Y
         else
             local button = create("TextButton", {
                 BackgroundColor3 = Theme.Control,
@@ -1459,20 +1988,17 @@ function UI:_showContext(widget, builder)
                 TextXAlignment = Enum.TextXAlignment.Left,
                 AutoButtonColor = false,
                 LayoutOrder = index,
-                ZIndex = 101,
-                Parent = menu,
+                ZIndex = 102,
+                Parent = scroll,
             })
             corner(button, 5)
             pad(button, 0, { PaddingLeft = 7, PaddingRight = 7 })
-            if entry.kind == "toggle" then
-                local value = false
-                if entry.get then
-                    pcall(function()
-                        value = entry.get(widget, self) and true or false
-                    end)
-                end
+            if kind == "toggle" then
+                local value = valueOf(entry) and true or false
                 button.Text = tostring(entry.text or "Option") .. "  " .. (value and "ON" or "OFF")
                 button.TextColor3 = value and self.accent or Theme.Sub
+            elseif kind == "keybind" then
+                button.Text = tostring(entry.text or "Set keybind") .. "  [" .. bindingName(valueOf(entry)) .. "]"
             end
             button.MouseEnter:Connect(function()
                 tween(button, QUICK, { BackgroundColor3 = Theme.Hover })
@@ -1481,20 +2007,30 @@ function UI:_showContext(widget, builder)
                 tween(button, QUICK, { BackgroundColor3 = Theme.Control })
             end)
             button.MouseButton1Click:Connect(function()
-                if entry.kind == "toggle" then
-                    local value = false
-                    if entry.get then
-                        pcall(function()
-                            value = entry.get(widget, self) and true or false
-                        end)
+                if kind == "toggle" then
+                    setValue(entry, not (valueOf(entry) and true or false), true)
+                    button.Text = tostring(entry.text or "Option") .. "  " .. ((valueOf(entry) and true or false) and "ON" or "OFF")
+                elseif kind == "keybind" then
+                    if self._contextKeyInput then
+                        self._contextKeyInput:Disconnect()
                     end
-                    if entry.set then
-                        pcall(entry.set, not value, widget, self)
-                    end
-                elseif entry.set then
-                    pcall(entry.set, widget, self)
+                    button.Text = "PRESS INPUT"
+                    self._contextKeyInput = UserInputService.InputBegan:Connect(function(input, gpe)
+                        if gpe then
+                            return
+                        end
+                        local captured = inputBinding(input)
+                        if not captured then
+                            return
+                        end
+                        self._contextKeyInput:Disconnect()
+                        self._contextKeyInput = nil
+                        setValue(entry, captured == Enum.KeyCode.Backspace and nil or captured, true)
+                        button.Text = tostring(entry.text or "Set keybind") .. "  [" .. bindingName(valueOf(entry)) .. "]"
+                    end)
+                else
+                    setValue(entry, nil, false)
                 end
-                reopen()
             end)
         end
     end
@@ -1503,8 +2039,10 @@ function UI:_showContext(widget, builder)
             return
         end
         local point = UserInputService:GetMouseLocation()
-        local inside = point.X >= menu.AbsolutePosition.X and point.X <= menu.AbsolutePosition.X + menu.AbsoluteSize.X and point.Y >= menu.AbsolutePosition.Y and point.Y <= menu.AbsolutePosition.Y + menu.AbsoluteSize.Y
-        if not inside then
+        local function inside(target)
+            return target and target.Parent and point.X >= target.AbsolutePosition.X and point.X <= target.AbsolutePosition.X + target.AbsoluteSize.X and point.Y >= target.AbsolutePosition.Y and point.Y <= target.AbsolutePosition.Y + target.AbsoluteSize.Y
+        end
+        if not inside(menu) and not inside(self._contextSubPopup) then
             self:_closeContext()
         end
     end)
@@ -2029,6 +2567,9 @@ end
 
 function UI:SetVisible(v)
     self.visible = v
+    if not v then
+        self:_closeContext()
+    end
     for _, w in ipairs(self.windows) do
         w:SetVisible(v)
     end
