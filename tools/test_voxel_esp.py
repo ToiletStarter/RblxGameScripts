@@ -18,6 +18,7 @@ checks = [
     ("config persistence exists", all(value in source for value in ["voxel_esp", "autoload.txt", "version = 1", "saveConfig", "setAutoload"])),
     ("live status exists", all(value in source for value in ["VOXEL_ESP_LOAD", "getStats", "Read-only client-visible ESP"])),
     ("fullbright is opt-in and restorable", all(value in source for value in ["fullbright = false", "function applyFullbright", "function restoreLighting", "GetPropertyChangedSignal(property)", "localAppearanceOverrides"])),
+    ("combat tab is passive", all(value in source for value in ["window:Tab(\"Combat\")", "Passive target preview", "Observed trajectories", "CombatTrajectories", "trajectoryOn"])),
     ("passive boundary", all(token not in source for token in ["FireServer", "InvokeServer", "hookmetamethod", "hookfunction", "keypress", "mouse1click", "mousemoverel", "WalkSpeed =", "JumpPower =", "CFrame ="])),
     ("drag uses a target", all(value in ui for value in ["dragTarget", "RunService.RenderStepped", "math.clamp(dt * 18"])),
     ("drag does not tween window position", "tween(frame, DRAG, { Position" not in ui),

@@ -15,6 +15,7 @@ local ContextActionService = game:GetService("ContextActionService")
 local HttpService = game:GetService("HttpService")
 local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = workspace
 local LocalPlayer = Players.LocalPlayer
 
@@ -24,6 +25,7 @@ local session = {
     rootConnections = {},
     roots = {},
     caches = {},
+    trajectories = {},
     widgets = {},
     configStatus = "Starting",
     state = {
@@ -106,6 +108,22 @@ local session = {
         menuKey = "RightShift",
         customCursor = false,
         fullbright = false,
+        combatPreview = false,
+        combatFov = 240,
+        combatRange = 1500,
+        combatVisibleOnly = true,
+        combatFriends = false,
+        combatAllies = false,
+        combatCard = true,
+        combatBrackets = true,
+        combatLine = true,
+        combatLabel = true,
+        combatDistance = true,
+        combatHealth = true,
+        trajectoryOn = false,
+        trajectoryLimit = 16,
+        trajectoryLifetime = 2,
+        trajectoryColor = Color3.fromRGB(255, 180, 95),
     },
 }
 GENV[SLOT] = session
@@ -127,6 +145,7 @@ local menuAction
 local statusLabel
 local countLabel
 local configLabel
+local combatStatusLabel
 
 local function track(connection)
     if connection then
@@ -804,9 +823,68 @@ local function applyWorldState()
     end
 end
 
+local function applyCombatState()
+    if not esp then
+        return
+    end
+    local state = session.state
+    local target = esp.cfg.target
+    target.on = state.combatPreview
+    target.fov = state.combatFov
+    target.range = state.combatRange
+    target.showFov = state.combatPreview
+    target.visOnly = state.combatVisibleOnly
+    target.friends = state.combatFriends
+    target.allies = state.combatAllies
+    target.card = state.combatCard
+    target.brackets = state.combatBrackets
+    target.line = state.combatLine
+    target.label = state.combatLabel
+    target.dist = state.combatDistance
+    target.hp = state.combatHealth
+end
+
+local function pruneTrajectories(now)
+    for index = #session.trajectories, 1, -1 do
+        if session.trajectories[index].expires <= now then
+            table.remove(session.trajectories, index)
+        end
+    end
+    while #session.trajectories > session.state.trajectoryLimit do
+        table.remove(session.trajectories, 1)
+    end
+end
+
+local function bindTrajectoryObserver()
+    local connections = ReplicatedStorage:FindFirstChild("Connections")
+    local event = connections and connections:FindFirstChild("CombatTrajectories")
+    session.trajectoryAvailable = event and event:IsA("RemoteEvent") or false
+    if not session.trajectoryAvailable then
+        return
+    end
+    track(event.OnClientEvent:Connect(function(ownerId, records)
+        if type(records) ~= "table" then
+            return
+        end
+        local now = os.clock()
+        for _, record in ipairs(records) do
+            if type(record) == "table" and typeof(record.a) == "Vector3" and typeof(record.b) == "Vector3" then
+                session.trajectories[#session.trajectories + 1] = {
+                    a = record.a,
+                    b = record.b,
+                    owner = ownerId,
+                    expires = now + session.state.trajectoryLifetime,
+                }
+            end
+        end
+        pruneTrajectories(now)
+    end))
+end
+
 local function applyAll()
     applyPlayerState()
     applyWorldState()
+    applyCombatState()
 end
 
 local function syncWidgets()
@@ -995,6 +1073,12 @@ local function refreshStatus()
     setLabel(statusLabel, "FPS " .. tostring(math.floor((stats.fpsAvg or 0) + 0.5)) .. " | Drawn " .. tostring(stats.drawn or 0) .. " | Pool " .. tostring(stats.pool or 0))
     setLabel(countLabel, "Players " .. tostring(#Players:GetPlayers()) .. " | Pickups " .. tostring(pickupCount) .. " | Containers " .. tostring(containerCount) .. " | Zombies " .. tostring(#zombieSource()))
     setLabel(configLabel, "Config: " .. tostring(session.configStatus) .. " | Range " .. tostring(session.state.playerRange) .. "m")
+    if combatStatusLabel then
+        local target = esp and esp.target
+        local targetName = target and target.plr and target.plr.DisplayName or "none"
+        local trajectoryState = session.trajectoryAvailable and "available" or "unavailable"
+        setLabel(combatStatusLabel, "Preview target: " .. tostring(targetName) .. " | Trajectories: " .. tostring(#session.trajectories) .. " | Feed: " .. trajectoryState)
+    end
 end
 
 function session.snapshot()
@@ -1013,6 +1097,10 @@ function session.snapshot()
         pickups = #cacheList(session.caches.pickups),
         containers = #cacheList(session.caches.containers),
         zombies = #zombieSource(),
+        combatPreview = session.state.combatPreview,
+        trajectoryOn = session.state.trajectoryOn,
+        trajectories = #session.trajectories,
+        trajectoryAvailable = session.trajectoryAvailable == true,
         playerRange = session.state.playerRange,
         lootRange = session.state.lootRange,
         stats = stats,
@@ -1103,6 +1191,37 @@ local function boot()
     esp:setNPCLabel(function(model)
         return "ZOMBIE | " .. safeName(model)
     end)
+    esp:setTargetInfo(function(snapshot)
+        local character = snapshot.plr and snapshot.plr.Character
+        local tool = character and character:FindFirstChildOfClass("Tool")
+        if not tool then
+            return "UNARMED"
+        end
+        local ammo = safeNumber(tool, { "Ammo", "AmmoCount", "Magazine", "Mag", "CurrentAmmo" })
+        if ammo ~= nil then
+            return tostring(tool.Name) .. " | " .. tostring(math.floor(ammo + 0.5)) .. " ammo"
+        end
+        return tostring(tool.Name)
+    end)
+    esp:mod({
+        name = "voxel_trajectory_preview",
+        on = true,
+        screen = function(_, renderer)
+            if not session.state.trajectoryOn then
+                return
+            end
+            local now = os.clock()
+            pruneTrajectories(now)
+            for index, record in ipairs(session.trajectories) do
+                local ax, ay, ad, aon = renderer:project(record.a)
+                local bx, by, bd, bon = renderer:project(record.b)
+                if aon and bon and ad > 0 and bd > 0 then
+                    renderer.pool:line("voxel_traj_" .. tostring(index), ax, ay, bx, by, session.state.trajectoryColor, 1, 0.8, 35)
+                end
+            end
+        end,
+    })
+    bindTrajectoryObserver()
     esp:flag("tool", function(snapshot)
         local character = snapshot.plr and snapshot.plr.Character
         local tool = character and character:FindFirstChildOfClass("Tool")
@@ -1143,6 +1262,7 @@ local function boot()
     local playersTab = visualTab:SubTab("Players")
     local worldTab = visualTab:SubTab("World")
     local lootTab = visualTab:SubTab("Loot")
+    local combatTab = window:Tab("Combat")
     local miscTab = window:Tab("Status")
 
     local playerMain = playersTab:Section("Player overlay")
@@ -1260,6 +1380,34 @@ local function boot()
     bindColor(lootRangeRight, "Medical", "lootMedicalColor")
     bindColor(lootRangeRight, "Food", "lootFoodColor")
     bindColor(lootRangeRight, "Dropped", "lootDroppedColor")
+
+    local combatMain = combatTab:Section("Passive target preview")
+    local combatGrid = combatMain:Grid(2)
+    local combatLeft = combatGrid:Column(1)
+    local combatRight = combatGrid:Column(2)
+    bindToggle(combatLeft, "Target preview", "combatPreview")
+    bindSlider(combatLeft, "Preview FOV", "combatFov", 40, 500, 10, "px")
+    bindSlider(combatLeft, "Preview range", "combatRange", 100, 5000, 100, "m")
+    bindToggle(combatLeft, "Visible only", "combatVisibleOnly")
+    bindToggle(combatLeft, "Include friends", "combatFriends")
+    bindToggle(combatLeft, "Include allies", "combatAllies")
+    bindToggle(combatRight, "Target card", "combatCard")
+    bindToggle(combatRight, "Brackets", "combatBrackets")
+    bindToggle(combatRight, "Snapline", "combatLine")
+    bindToggle(combatRight, "Label", "combatLabel")
+    bindToggle(combatRight, "Distance", "combatDistance")
+    bindToggle(combatRight, "Health", "combatHealth")
+
+    local trajectorySection = combatTab:Section("Observed trajectories")
+    local trajectoryGrid = trajectorySection:Grid(2)
+    local trajectoryLeft = trajectoryGrid:Column(1)
+    local trajectoryRight = trajectoryGrid:Column(2)
+    bindToggle(trajectoryLeft, "Trajectory preview", "trajectoryOn")
+    bindSlider(trajectoryLeft, "Trajectory cap", "trajectoryLimit", 4, 32, 4, "")
+    bindSlider(trajectoryLeft, "Lifetime", "trajectoryLifetime", 1, 5, 1, "s")
+    bindColor(trajectoryLeft, "Trajectory color", "trajectoryColor")
+    trajectoryRight:Label("Client-visible trajectory telemetry only. No shot remotes, aim redirection, input synthesis, or firing automation.")
+    combatStatusLabel = trajectoryRight:Label("Preview target: none | Trajectories: 0")
 
     local interface = miscTab:Section("Interface and config")
     local interfaceGrid = interface:Grid(2)

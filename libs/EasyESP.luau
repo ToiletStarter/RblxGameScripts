@@ -589,6 +589,7 @@ local function defaults()
         target = {
             on = false,
             fov = 240,
+            range = 0,
             showFov = false,
             visOnly = false,
             friends = true,
@@ -2509,7 +2510,8 @@ function ESP:_pick()
     local best, score = nil, huge
     for i = 1, #self.snap do
         local s = self.snap[i]
-        if not s.npc and s.bx and s.on and s.depth > 0 and (self.cfg.espRange <= 0 or s.dist <= self.cfg.espRange) then
+        local targetRange = tonumber(cfg.range) or tonumber(self.cfg.espRange) or 0
+        if not s.npc and s.bx and s.on and s.depth > 0 and (targetRange <= 0 or s.dist <= targetRange) then
             if (cfg.allies or not s.ally) and (cfg.friends or not s.friend) and (not cfg.visOnly or s.vis ~= false) then
                 local tx = s.bx + s.bw * 0.5
                 local ty = s.by + s.bh * 0.5

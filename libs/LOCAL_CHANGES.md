@@ -28,6 +28,10 @@ Window dragging now updates a target position and follows it from one RenderStep
 
 This prevents arrows surviving a Player ESP disable or leaking through an explicitly hidden occluded category.
 
+### Passive target preview range
+
+The target selector accepts `cfg.target.range` and uses it independently from the main player render reach. Consumers can show a bounded target-preview FOV/card without expanding every player visual channel or coupling preview range to the player ESP range.
+
 ## Verification and release boundary
 
 `tools/test_hush.py` compiles both real libraries and executes their actual cursor, flag setter, and arrow methods with negative and positive behavioral assertions. The consumer's broader mock suite checks callback wiring, config round trips, cache/replication edges, and lifecycle cleanup.
