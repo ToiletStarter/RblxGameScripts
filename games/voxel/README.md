@@ -39,9 +39,10 @@ Loot filters are display categories derived from client-visible item names, attr
 - Right-click interactive controls for context actions
 - RightShift, Insert, F6, or F7 menu binding
 - Save config, reload config, enable autoload, clear autoload, and unload
+- Optional local fullbright with automatic restoration on disable, unload, and reload
 - Config files live under `voxel_esp/` in the executor workspace
 - The final default configuration keeps world-heavy categories disabled
 
 ## Boundary
 
-The consumer does not invoke remotes, install hooks, synthesize input, move the character, change weapon state, or mutate the world. It only renders client-visible state and local Drawing/UI output.
+The consumer does not invoke remotes, install hooks, synthesize input, move the character, or change weapon state. Fullbright is an opt-in local Lighting override; it is restored on disable and unload. The other features only render client-visible state and local Drawing/UI output.

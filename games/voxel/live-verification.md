@@ -29,6 +29,7 @@ Structural live checks passed:
 - Unload removed the owned root and cleared the session slot
 - Reload restored one root and persisted the test range value
 - Final reload restored the sane default player range of 3000m
+- Fullbright toggle applied `Brightness=3`, `ClockTime=14`, and `GlobalShadows=false`; disabling it restored the captured Lighting values and cleared `localAppearanceOverrides`
 
 The host screenshot helper could not capture the Roblox window because it returned `no window for process RobloxPlayerBeta`. Desktop computer-use capture was unavailable in this session, so visual pixel inspection remains blocked. Structural UI checks and live renderer checks passed; the drag fix still needs a visual capture when a host capture path is available.
 

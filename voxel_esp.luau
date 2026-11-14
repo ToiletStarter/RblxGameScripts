@@ -14,6 +14,7 @@ local UserInputService = game:GetService("UserInputService")
 local ContextActionService = game:GetService("ContextActionService")
 local HttpService = game:GetService("HttpService")
 local CollectionService = game:GetService("CollectionService")
+local Lighting = game:GetService("Lighting")
 local Workspace = workspace
 local LocalPlayer = Players.LocalPlayer
 
@@ -104,9 +105,20 @@ local session = {
         lootDroppedColor = Color3.fromRGB(255, 135, 95),
         menuKey = "RightShift",
         customCursor = false,
+        fullbright = false,
     },
 }
 GENV[SLOT] = session
+
+local originalLighting = {
+    Brightness = Lighting.Brightness,
+    ClockTime = Lighting.ClockTime,
+    GlobalShadows = Lighting.GlobalShadows,
+    Ambient = Lighting.Ambient,
+    OutdoorAmbient = Lighting.OutdoorAmbient,
+    ExposureCompensation = Lighting.ExposureCompensation,
+}
+local lightingGuard = false
 
 local esp
 local ui
@@ -289,6 +301,45 @@ local function setAutoload(enabled)
     end
     session.configStatus = "Autoload already clear"
     return true
+end
+
+local function restoreLighting()
+    lightingGuard = true
+    Lighting.Brightness = originalLighting.Brightness
+    Lighting.ClockTime = originalLighting.ClockTime
+    Lighting.GlobalShadows = originalLighting.GlobalShadows
+    Lighting.Ambient = originalLighting.Ambient
+    Lighting.OutdoorAmbient = originalLighting.OutdoorAmbient
+    Lighting.ExposureCompensation = originalLighting.ExposureCompensation
+    lightingGuard = false
+end
+
+local function applyFullbright()
+    if lightingGuard then
+        return
+    end
+    if not session.state.fullbright then
+        restoreLighting()
+        return
+    end
+    lightingGuard = true
+    Lighting.Brightness = 3
+    Lighting.ClockTime = 14
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.fromRGB(210, 210, 210)
+    Lighting.OutdoorAmbient = Color3.fromRGB(210, 210, 210)
+    Lighting.ExposureCompensation = 0
+    lightingGuard = false
+end
+
+local function bindLightingGuard()
+    for _, property in ipairs({ "Brightness", "ClockTime", "GlobalShadows", "Ambient", "OutdoorAmbient", "ExposureCompensation" }) do
+        track(Lighting:GetPropertyChangedSignal(property):Connect(function()
+            if session.state.fullbright and not lightingGuard then
+                applyFullbright()
+            end
+        end))
+    end
 end
 
 local function loadLibrary(path)
@@ -954,6 +1005,8 @@ function session.snapshot()
         hooks = false,
         inputSynthesis = false,
         worldMutation = false,
+        localAppearanceOverrides = session.state.fullbright,
+        fullbright = session.state.fullbright,
         running = not session.unloaded,
         guiName = GUI_NAME,
         players = #Players:GetPlayers(),
@@ -975,6 +1028,8 @@ function session.unload(persist)
     if persist ~= false then
         pcall(saveConfig)
     end
+    session.state.fullbright = false
+    restoreLighting()
     if menuAction then
         pcall(ContextActionService.UnbindAction, ContextActionService, menuAction)
         menuAction = nil
@@ -1004,6 +1059,8 @@ end
 
 local function boot()
     loadConfig()
+    bindLightingGuard()
+    applyFullbright()
     clearGuiRoots()
     resolveRoots()
     track(Workspace.ChildAdded:Connect(function(child)
@@ -1211,6 +1268,7 @@ local function boot()
     bindDropdown(interfaceLeft, "Menu key", "menuKey", { "RightShift", "Insert", "F6", "F7" }, function()
         bindMenu()
     end)
+    bindToggle(interfaceLeft, "Fullbright", "fullbright", applyFullbright)
     bindToggle(interfaceLeft, "Custom cursor", "customCursor", function()
         ui:SetCursorVisible(session.state.customCursor)
     end)
