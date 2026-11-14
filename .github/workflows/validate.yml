@@ -14,3 +14,10 @@ jobs:
           python-version: "3.x"
       - run: python tools/validate.py
       - run: python tools/test_features.py
+      - run: python tools/test_voxel_esp.py
+      - name: Install pinned Luau test tools
+        run: |
+          curl -fsSL https://github.com/luau-lang/luau/releases/download/0.746/luau-ubuntu.zip -o "$RUNNER_TEMP/luau.zip"
+          unzip -q "$RUNNER_TEMP/luau.zip" -d "$RUNNER_TEMP/luau"
+          chmod +x "$RUNNER_TEMP/luau/luau" "$RUNNER_TEMP/luau/luau-compile"
+      - run: python tools/test_hush.py --luau "$RUNNER_TEMP/luau/luau"

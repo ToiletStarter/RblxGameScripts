@@ -7,7 +7,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local UI = {}
 UI.__index = UI
-UI._VERSION = "1.0.0"
+UI._VERSION = "1.1.0"
 UI._STYLE = "style_2"
 
 local function fontOr(name, fallback)
@@ -504,6 +504,7 @@ function Section:Toggle(opts)
         BackgroundTransparency = 1,
         Size = UDim2.fromScale(1, 1),
         Text = "",
+        AutoButtonColor = false,
         Parent = row,
     })
     hoverable(btn, Theme.Control, Theme.Hover, row)
@@ -563,6 +564,7 @@ function Section:Button(opts)
         Text = opts.text or "Button",
         TextSize = 12,
         TextColor3 = Theme.Text,
+        AutoButtonColor = false,
         Parent = row,
     })
     hoverable(btn, Theme.Control, Theme.Hover, row)
@@ -684,6 +686,7 @@ function Section:Slider(opts)
         Position = UDim2.new(0, 4, 0, sliderHitY),
         Size = UDim2.new(1, -8, 0, 18),
         Text = "",
+        AutoButtonColor = false,
         Parent = row,
     })
 
@@ -1073,6 +1076,7 @@ function Section:Colorpicker(opts)
             BackgroundTransparency = 1,
             Size = UDim2.new(1, 0, 0, 20),
             Text = "",
+            AutoButtonColor = false,
             Parent = tray,
         })
         local dragging = false
@@ -1367,21 +1371,15 @@ function Window:SetVisible(v)
     local position = self.frame.Position
     if v then
         self.frame.Visible = true
-        self.frame.Position = UDim2.fromOffset(position.X.Offset, position.Y.Offset + 6)
-        self.frame.BackgroundTransparency = 1
-        tween(self.frame, SPRING, {
-            Position = position,
-            BackgroundTransparency = self.ui.transparency,
-        })
+        self.frame.BackgroundTransparency = self.ui.transparency
+        tween(self.frame, SPRING, { Position = position })
     else
-        tween(self.frame, QUICK, {
-            Position = UDim2.fromOffset(position.X.Offset, position.Y.Offset + 6),
-            BackgroundTransparency = 1,
-        })
+        tween(self.frame, QUICK, { Position = position })
         task.delay(0.16, function()
             if self._transition == token then
                 self.frame.Visible = false
                 self.frame.Position = position
+                self.frame.BackgroundTransparency = self.ui.transparency
             end
         end)
     end
@@ -1536,6 +1534,7 @@ function UI:_contextConnect(signal, fn)
 end
 
 function UI:_closeContext()
+    self._contextDragging = false
     if self._contextInput then
         pcall(function()
             self._contextInput:Disconnect()
@@ -1565,11 +1564,32 @@ function UI:_closeContext()
 end
 
 function UI:_bindContext(widget, frame, builder)
-    self:_connect(frame.InputBegan, function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton2 then
-            self:_showContext(widget, builder)
+    local lastOpen = 0
+    local function open()
+        local now = os.clock()
+        if now - lastOpen < 0.06 then
+            return
         end
-    end)
+        lastOpen = now
+        self:_showContext(widget, builder)
+    end
+    local function bind(target)
+        if not target or not target:IsA("GuiObject") then
+            return
+        end
+        self:_connect(target.InputBegan, function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton2 then
+                open()
+            end
+        end)
+        if target:IsA("GuiButton") then
+            self:_connect(target.MouseButton2Click, open)
+        end
+    end
+    bind(frame)
+    for _, target in ipairs(frame:GetDescendants()) do
+        bind(target)
+    end
 end
 
 function UI:_showContext(widget, builder)
@@ -1583,7 +1603,8 @@ function UI:_showContext(widget, builder)
     local mouse = UserInputService:GetMouseLocation()
     local camera = workspace.CurrentCamera
     local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
-    local height = 10
+    local headerHeight = 27
+    local height = headerHeight + 5
     for _, entry in ipairs(entries) do
         local kind = type(entry) == "table" and entry.kind or "button"
         local entryHeight = 26
@@ -1595,25 +1616,57 @@ function UI:_showContext(widget, builder)
         height = height + entryHeight + 3
     end
     local shownHeight = math.min(height, math.max(120, viewport.Y - 16))
-    local x = math.clamp(mouse.X, 4, math.max(4, viewport.X - 268))
+    local menuWidth = 238
+    local x = math.clamp(mouse.X, 4, math.max(4, viewport.X - menuWidth - 4))
     local y = math.clamp(mouse.Y, 4, math.max(4, viewport.Y - shownHeight - 4))
     local menu = create("Frame", {
         Name = "ContextMenu",
         BackgroundColor3 = Theme.Panel,
         BackgroundTransparency = 0.02,
         Position = UDim2.fromOffset(x, y),
-        Size = UDim2.fromOffset(264, shownHeight),
+        Size = UDim2.fromOffset(menuWidth, shownHeight),
         BorderSizePixel = 0,
         ClipsDescendants = true,
         Active = true,
         ZIndex = 100,
         Parent = self.gui,
     })
-    corner(menu, 8)
-    stroke(menu, Theme.Stroke, 1, 0.1)
+    corner(menu, 6)
+    stroke(menu, self.accent, 1, 0.65)
+    local header = create("Frame", {
+        BackgroundColor3 = Theme.Titlebar,
+        BackgroundTransparency = 0.04,
+        Size = UDim2.new(1, 0, 0, headerHeight),
+        BorderSizePixel = 0,
+        ZIndex = 102,
+        Parent = menu,
+    })
+    corner(header, 6)
+    create("Frame", {
+        BackgroundColor3 = self.accent,
+        Position = UDim2.fromOffset(7, 7),
+        Size = UDim2.fromOffset(3, 13),
+        BorderSizePixel = 0,
+        ZIndex = 103,
+        Parent = header,
+    })
+    corner(header:FindFirstChildOfClass("Frame") or header, 2)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(17, 0),
+        Size = UDim2.new(1, -24, 1, 0),
+        Font = Theme.Medium,
+        Text = string.upper(tostring(widget.opts and widget.opts.text or "OPTIONS")),
+        TextSize = 10,
+        TextColor3 = Theme.Text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 103,
+        Parent = header,
+    })
     local scroll = create("ScrollingFrame", {
         BackgroundTransparency = 1,
-        Size = UDim2.fromScale(1, 1),
+        Position = UDim2.fromOffset(0, headerHeight + 1),
+        Size = UDim2.new(1, 0, 1, -(headerHeight + 1)),
         CanvasSize = UDim2.new(),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ScrollBarThickness = 2,
@@ -1863,6 +1916,7 @@ function UI:_showContext(widget, builder)
             end
             hit.MouseButton1Down:Connect(function()
                 dragging = true
+                self._contextDragging = true
                 apply(UserInputService:GetMouseLocation().X)
             end)
             self:_contextConnect(UserInputService.InputChanged, function(input)
@@ -1873,6 +1927,7 @@ function UI:_showContext(widget, builder)
             self:_contextConnect(UserInputService.InputEnded, function(input)
                 if input.UserInputType == Enum.UserInputType.MouseButton1 then
                     dragging = false
+                    self._contextDragging = false
                 end
             end)
             paint()
@@ -1993,10 +2048,39 @@ function UI:_showContext(widget, builder)
             })
             corner(button, 5)
             pad(button, 0, { PaddingLeft = 7, PaddingRight = 7 })
+            local toggleTrack, toggleKnob, paintToggle
             if kind == "toggle" then
-                local value = valueOf(entry) and true or false
-                button.Text = tostring(entry.text or "Option") .. "  " .. (value and "ON" or "OFF")
-                button.TextColor3 = value and self.accent or Theme.Sub
+                button.Text = tostring(entry.text or "Option")
+                button.TextColor3 = Theme.Text
+                toggleTrack = create("Frame", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -7, 0.5, 0),
+                    Size = UDim2.fromOffset(28, 14),
+                    BackgroundColor3 = Theme.Hover,
+                    BorderSizePixel = 0,
+                    ZIndex = 103,
+                    Parent = button,
+                })
+                corner(toggleTrack, 999)
+                toggleKnob = create("Frame", {
+                    AnchorPoint = Vector2.new(0, 0.5),
+                    Position = UDim2.new(0, 2, 0.5, 0),
+                    Size = UDim2.fromOffset(10, 10),
+                    BackgroundColor3 = Theme.Sub,
+                    BorderSizePixel = 0,
+                    ZIndex = 104,
+                    Parent = toggleTrack,
+                })
+                corner(toggleKnob, 999)
+                paintToggle = function()
+                    local value = valueOf(entry) and true or false
+                    tween(toggleTrack, QUICK, { BackgroundColor3 = value and self.accent or Theme.Hover })
+                    tween(toggleKnob, QUICK, {
+                        Position = value and UDim2.new(1, -12, 0.5, 0) or UDim2.new(0, 2, 0.5, 0),
+                        BackgroundColor3 = value and Color3.new(1, 1, 1) or Theme.Sub,
+                    })
+                end
+                paintToggle()
             elseif kind == "keybind" then
                 button.Text = tostring(entry.text or "Set keybind") .. "  [" .. bindingName(valueOf(entry)) .. "]"
             end
@@ -2009,7 +2093,9 @@ function UI:_showContext(widget, builder)
             button.MouseButton1Click:Connect(function()
                 if kind == "toggle" then
                     setValue(entry, not (valueOf(entry) and true or false), true)
-                    button.Text = tostring(entry.text or "Option") .. "  " .. ((valueOf(entry) and true or false) and "ON" or "OFF")
+                    if paintToggle then
+                        paintToggle()
+                    end
                 elseif kind == "keybind" then
                     if self._contextKeyInput then
                         self._contextKeyInput:Disconnect()
@@ -2034,11 +2120,14 @@ function UI:_showContext(widget, builder)
             end)
         end
     end
-    self._contextInput = UserInputService.InputBegan:Connect(function(input)
+    self._contextInput = UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
             return
         end
-        local point = UserInputService:GetMouseLocation()
+        if self._contextDragging then
+            return
+        end
+        local point = input.Position
         local function inside(target)
             return target and target.Parent and point.X >= target.AbsolutePosition.X and point.X <= target.AbsolutePosition.X + target.AbsoluteSize.X and point.Y >= target.AbsolutePosition.Y and point.Y <= target.AbsolutePosition.Y + target.AbsoluteSize.Y
         end
@@ -2082,10 +2171,10 @@ function UI:Get(flag)
     return self.flags[flag]
 end
 
-function UI:Set(flag, value)
+function UI:Set(flag, value, silent)
     local ws = self._widgets[flag]
     if ws and ws[1] then
-        ws[1]:Set(value)
+        ws[1]:Set(value, silent)
     else
         self.flags[flag] = value
     end
@@ -2397,6 +2486,7 @@ function UI:Window(title, opts)
         Position = UDim2.new(1, -9, 0.5, 0),
         Size = UDim2.fromOffset(18, 18),
         BackgroundTransparency = 1,
+        AutoButtonColor = false,
         Font = Theme.Bold,
         Text = "—",
         TextSize = 12,
@@ -2494,11 +2584,23 @@ function UI:Window(title, opts)
     resizeGrip2.Position = UDim2.fromOffset(10, 10)
     resizeGrip2.Parent = resizeHandle
 
-    local dragging, dragStart, startPos
+    local dragging, dragStart, startPos, dragTarget
     local resizing, resizeStart, resizeSize
+    local function normalizeWindowOpacity()
+        if frame.Parent then
+            frame.BackgroundTransparency = self.transparency
+            titlebar.BackgroundTransparency = 0.25
+        end
+    end
+    self:_connect(frame:GetPropertyChangedSignal("BackgroundTransparency"), function()
+        if frame.Parent and frame.BackgroundTransparency ~= self.transparency then
+            frame.BackgroundTransparency = self.transparency
+        end
+    end)
     resizeHandle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             resizing = true
+            normalizeWindowOpacity()
             resizeStart = input.Position
             resizeSize = frame.AbsoluteSize
             self.activeWindow = win
@@ -2518,30 +2620,52 @@ function UI:Window(title, opts)
     self:_connect(UserInputService.InputEnded, function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 and resizing then
             resizing = false
+            normalizeWindowOpacity()
             tween(frameStroke, QUICK, { Transparency = 0.25, Thickness = 1 })
         end
+    end)
+
+    self:_connect(RunService.RenderStepped, function(dt)
+        if not dragging or not dragTarget or not frame.Parent then
+            return
+        end
+        local current = frame.Position
+        local alpha = math.clamp(dt * 18, 0, 1)
+        local x = current.X.Offset + (dragTarget.X.Offset - current.X.Offset) * alpha
+        local y = current.Y.Offset + (dragTarget.Y.Offset - current.Y.Offset) * alpha
+        if math.abs(dragTarget.X.Offset - x) < 0.5 then
+            x = dragTarget.X.Offset
+        end
+        if math.abs(dragTarget.Y.Offset - y) < 0.5 then
+            y = dragTarget.Y.Offset
+        end
+        frame.Position = UDim2.fromOffset(x, y)
     end)
 
     titlebar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
+            normalizeWindowOpacity()
             dragStart = input.Position
             startPos = frame.Position
+            dragTarget = startPos
             self.activeWindow = win
-            tween(frame, QUICK, { BackgroundTransparency = math.max(self.transparency - 0.04, 0) })
             tween(frameStroke, QUICK, { Transparency = 0.08, Thickness = 1.5 })
         end
     end)
     self:_connect(UserInputService.InputChanged, function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
             local d = input.Position - dragStart
-            tween(frame, DRAG, { Position = UDim2.fromOffset(startPos.X.Offset + d.X, startPos.Y.Offset + d.Y) })
+            dragTarget = UDim2.fromOffset(startPos.X.Offset + d.X, startPos.Y.Offset + d.Y)
         end
     end)
     self:_connect(UserInputService.InputEnded, function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
             dragging = false
-            tween(frame, QUICK, { BackgroundTransparency = self.transparency })
+            normalizeWindowOpacity()
+            if dragTarget then
+                frame.Position = dragTarget
+            end
             tween(frameStroke, QUICK, { Transparency = 0.25, Thickness = 1 })
         end
     end)
@@ -2556,10 +2680,8 @@ function UI:Window(title, opts)
         end
     end)
 
-    frame.Size = UDim2.fromOffset(width, 40)
-    frame.BackgroundTransparency = 1
-    tween(frame, POP, { Size = UDim2.fromOffset(width, height) })
-    tween(frame, SPRING, { BackgroundTransparency = self.transparency })
+    frame.Size = UDim2.fromOffset(width, height)
+    frame.BackgroundTransparency = self.transparency
 
     self.windows[#self.windows + 1] = win
     return win
@@ -2594,7 +2716,11 @@ function UI:SetCursorVisible(v)
     if self._cursor then
         self._cursor.Visible = self.cursorEnabled and self.visible
         pcall(function()
-            UserInputService.MouseIconEnabled = self.cursorEnabled and self.visible and false or self._mouseIconEnabled
+            if self.cursorEnabled and self.visible then
+                UserInputService.MouseIconEnabled = false
+            else
+                UserInputService.MouseIconEnabled = self._mouseIconEnabled
+            end
         end)
     end
     return self
@@ -2701,10 +2827,14 @@ function UI.new(opts)
         pcall(function()
             UserInputService.MouseIconEnabled = false
         end)
+        local cursorX, cursorY
         self:_connect(RunService.RenderStepped, function()
-            if self._cursor and self._cursor.Parent then
+            if self._cursor and self._cursor.Parent and self.visible and self.cursorEnabled then
                 local mouse = UserInputService:GetMouseLocation()
-                self._cursor.Position = UDim2.fromOffset(mouse.X, mouse.Y)
+                if mouse.X ~= cursorX or mouse.Y ~= cursorY then
+                    self._cursor.Position = UDim2.fromOffset(mouse.X, mouse.Y)
+                    cursorX, cursorY = mouse.X, mouse.Y
+                end
             end
         end)
     end

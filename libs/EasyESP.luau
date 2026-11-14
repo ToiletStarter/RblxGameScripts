@@ -92,6 +92,62 @@ local function col(x, fallback)
     return fallback or WHITE
 end
 
+local NPC_HP_FIELDS = { "Health", "HP", "CurrentHealth", "CurrentHP" }
+local NPC_MAX_HP_FIELDS = { "MaxHealth", "MaxHP", "HealthMax", "MaximumHealth" }
+
+local function numberField(instance, names)
+    if not instance then
+        return nil
+    end
+    for _, name in ipairs(names) do
+        local ok, value = pcall(function()
+            return instance:GetAttribute(name)
+        end)
+        local number = ok and tonumber(value) or nil
+        if number ~= nil then
+            return number
+        end
+        local child = instance:FindFirstChild(name)
+        if child and child:IsA("ValueBase") then
+            local childOk, childValue = pcall(function()
+                return child.Value
+            end)
+            number = childOk and tonumber(childValue) or nil
+            if number ~= nil then
+                return number
+            end
+        end
+    end
+    return nil
+end
+
+local function npcVitals(model, hum)
+    local modelHp = numberField(model, NPC_HP_FIELDS)
+    local modelMax = numberField(model, NPC_MAX_HP_FIELDS)
+    local humHp = hum and tonumber(hum.Health) or nil
+    local humMax = hum and tonumber(hum.MaxHealth) or nil
+    local humFieldHp = numberField(hum, NPC_HP_FIELDS)
+    local humFieldMax = numberField(hum, NPC_MAX_HP_FIELDS)
+    if humFieldHp ~= nil and (humHp == nil or humFieldHp < humHp) then
+        humHp = humFieldHp
+    end
+    if humFieldMax ~= nil and (humMax == nil or humFieldMax > humMax) then
+        humMax = humFieldMax
+    end
+    local hp = humHp or modelHp or 0
+    local maxHp = humMax or modelMax or 100
+    if modelHp ~= nil and (humHp == nil or modelHp < humHp) then
+        hp = modelHp
+        maxHp = modelMax or humMax or maxHp
+    elseif modelMax ~= nil and (humMax == nil or modelMax > humMax) then
+        maxHp = modelMax
+    end
+    if maxHp <= 0 then
+        maxHp = 100
+    end
+    return hp, maxHp
+end
+
 local function deep(x)
     if type(x) ~= "table" then
         return x
@@ -498,6 +554,9 @@ local function defaults()
             rad = 190,
             size = 14,
             col = p.accent,
+            colorMode = "static",
+            colNear = p.accent,
+            colFar = p.accent,
             fill = true,
             outline = true,
             dist = false,
@@ -636,6 +695,9 @@ local function defaults()
             on = false,
             mode = "highlight",
             depth = "top",
+            wall = false,
+            wallFillA = 0.72,
+            wallLineA = 0,
             team = false,
             fill = true,
             fillCol = WHITE,
@@ -648,6 +710,8 @@ local function defaults()
             matA = 0.2,
             matHead = true,
             tint = false,
+            partVis = false,
+            partStep = 120,
             vis = p.good,
             hid = p.bad,
             rainbow = false,
@@ -769,7 +833,7 @@ local DESCRIPTORS = {
     desc("self.cross.on", "toggle", "Crosshair", { window = "Self", tab = "Crosshair", section = "Crosshair", order = 50, default = pathGet(DESCRIPTOR_DEFAULTS, "self.cross.on") }),
 
     desc("chams.on", "toggle", "Chams", { window = "Visuals", tab = "Chams", section = "Main", order = 170, default = pathGet(DESCRIPTOR_DEFAULTS, "chams.on") }),
-    desc("chams.mode", "dropdown", "Mode", { window = "Visuals", tab = "Chams", section = "Main", order = 180, items = { "highlight", "material" }, default = pathGet(DESCRIPTOR_DEFAULTS, "chams.mode") }),
+    desc("chams.mode", "dropdown", "Mode", { window = "Visuals", tab = "Chams", section = "Main", order = 180, items = { "highlight", "material", "texture" }, default = pathGet(DESCRIPTOR_DEFAULTS, "chams.mode") }),
     desc("chams.depth", "dropdown", "Depth", { window = "Visuals", tab = "Chams", section = "Main", order = 190, items = { "top", "occluded" }, default = pathGet(DESCRIPTOR_DEFAULTS, "chams.depth") }),
     desc("chams.team", "toggle", "Team Check", { window = "Visuals", tab = "Chams", section = "Main", order = 200, default = pathGet(DESCRIPTOR_DEFAULTS, "chams.team") }),
     desc("chams.tint", "toggle", "Visibility Tint", { window = "Visuals", tab = "Chams", section = "Main", order = 210, default = pathGet(DESCRIPTOR_DEFAULTS, "chams.tint") }),
@@ -800,8 +864,9 @@ function Pool.new()
     return setmetatable({
         bank = {},
         sh = {},
-        live = {},
-        prev = {},
+        liveStamp = {},
+        liveKeys = {},
+        prevKeys = {},
         idle = {},
         frame = 0,
         size = 0,
@@ -824,16 +889,17 @@ function Pool:get(key, kind)
         self.sh[key] = { kind = kind }
         self.size = self.size + 1
     end
-    self.live[key] = true
+    if self.liveStamp[key] ~= self.frame then
+        self.liveStamp[key] = self.frame
+        self.liveKeys[#self.liveKeys + 1] = key
+    end
     self.idle[key] = nil
     return d, self.sh[key]
 end
 
 function Pool:begin()
     self.frame = self.frame + 1
-    for k in pairs(self.live) do
-        self.live[k] = nil
-    end
+    table.clear(self.liveKeys)
 end
 
 function Pool:_hide(key)
@@ -849,22 +915,23 @@ function Pool:_hide(key)
 end
 
 function Pool:finish()
-    for k in pairs(self.prev) do
-        if not self.live[k] then
+    for i = 1, #self.prevKeys do
+        local k = self.prevKeys[i]
+        if self.liveStamp[k] ~= self.frame then
             self:_hide(k)
         end
-        self.prev[k] = nil
     end
-    for k in pairs(self.live) do
-        self.prev[k] = true
-    end
+    self.prevKeys, self.liveKeys = self.liveKeys, self.prevKeys
+    table.clear(self.liveKeys)
 end
 
 function Pool:carry(prefix)
     local n = #prefix
-    for k in pairs(self.prev) do
-        if not self.live[k] and k:sub(1, n) == prefix then
-            self.live[k] = true
+    for i = 1, #self.prevKeys do
+        local k = self.prevKeys[i]
+        if self.liveStamp[k] ~= self.frame and k:sub(1, n) == prefix then
+            self.liveStamp[k] = self.frame
+            self.liveKeys[#self.liveKeys + 1] = k
         end
     end
 end
@@ -885,8 +952,7 @@ function Pool:prune(n)
             self.bank[k] = nil
             self.sh[k] = nil
             self.idle[k] = nil
-            self.prev[k] = nil
-            self.live[k] = nil
+            self.liveStamp[k] = nil
             self.size = max(0, self.size - 1)
         end
     end
@@ -896,12 +962,9 @@ function Pool:reset()
     for k in pairs(self.bank) do
         self:_hide(k)
     end
-    for k in pairs(self.prev) do
-        self.prev[k] = nil
-    end
-    for k in pairs(self.live) do
-        self.live[k] = nil
-    end
+    table.clear(self.prevKeys)
+    table.clear(self.liveKeys)
+    table.clear(self.liveStamp)
 end
 
 function Pool:nuke()
@@ -912,8 +975,9 @@ function Pool:nuke()
     end
     self.bank = {}
     self.sh = {}
-    self.live = {}
-    self.prev = {}
+    self.liveStamp = {}
+    self.liveKeys = {}
+    self.prevKeys = {}
     self.idle = {}
     self.frame = 0
     self.size = 0
@@ -1280,6 +1344,7 @@ function ESP.new(opt)
     self.npcSrc = nil
     self.npcLabel = nil
     self.playerLabel = nil
+    self.playerFilter = nil
     self._npcId = 0
     self.plrs = {}
     self.con = {}
@@ -1541,6 +1606,13 @@ function ESP:_rec(r)
         r.pivot = nil
         r.size = nil
         r.box = nil
+        r.visParts = nil
+        r.visChar = nil
+        r.matParts = nil
+        r.matPartsAt = nil
+        r.vitalMode = nil
+        r.label = nil
+        r.labelAt = nil
         if r.hum then
             r.hp=r.hum.Health
             r.maxHp=r.hum.MaxHealth
@@ -1567,7 +1639,7 @@ function ESP:_rec(r)
     return r.char, r.hum, r.root, r.head
 end
 
-function ESP:_canSee(char, points)
+function ESP:_canSee(char, points, cache)
     if not char or not cam then
         return false
     end
@@ -1575,26 +1647,33 @@ function ESP:_canSee(char, points)
     local mine = lp.Character
     self.rp.FilterDescendantsInstances = mine and { mine } or {}
 
-    local n = 0
-    local parts = {}
+    local parts = cache and cache.visParts
+    if not parts or (cache and cache.visChar ~= char) then
+        parts = {}
+        local n = 0
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local head = char:FindFirstChild("Head")
+        if root then n = n + 1; parts[n] = root end
+        if head then n = n + 1; parts[n] = head end
+        if points >= 3 then
+            local a = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+            if a then n = n + 1; parts[n] = a end
+        end
+        if points >= 4 then
+            local a = char:FindFirstChild("LeftUpperArm") or char:FindFirstChild("Left Arm")
+            if a then n = n + 1; parts[n] = a end
+        end
+        if points >= 5 then
+            local a = char:FindFirstChild("RightUpperArm") or char:FindFirstChild("Right Arm")
+            if a then n = n + 1; parts[n] = a end
+        end
+        if cache then
+            cache.visParts = parts
+            cache.visChar = char
+        end
+    end
 
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local head = char:FindFirstChild("Head")
-    if root then n = n + 1; parts[n] = root end
-    if head then n = n + 1; parts[n] = head end
-    if points >= 3 then
-        local a = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
-        if a then n = n + 1; parts[n] = a end
-    end
-    if points >= 4 then
-        local a = char:FindFirstChild("LeftUpperArm") or char:FindFirstChild("Left Arm")
-        if a then n = n + 1; parts[n] = a end
-    end
-    if points >= 5 then
-        local a = char:FindFirstChild("RightUpperArm") or char:FindFirstChild("Right Arm")
-        if a then n = n + 1; parts[n] = a end
-    end
-
+    local n = #parts
     for i = 1, n do
         local part = parts[i]
         local dir = part.Position - eye
@@ -1704,7 +1783,7 @@ function ESP:_snap()
                     end
 
                     if needVis and (self:_turn(r.uid, visStep, 9) or r.vis == nil) then
-                        r.vis = self:_canSee(char, self.cfg.vis.points)
+                        r.vis = self:_canSee(char, self.cfg.vis.points, r)
                     end
 
                     local s = self:_mkSnap(r, char, root, head, hum, dist, boxStep, 2, function()
@@ -1716,7 +1795,16 @@ function ESP:_snap()
                     s.teamCol = plr.TeamColor and plr.TeamColor.Color or nil
                     s.ally = self:_ally(plr)
                     s.friend = self:_friend(plr)
-                    out[#out + 1] = s
+                    local include = true
+                    if type(self.playerFilter) == "function" then
+                        local okFilter, value = pcall(self.playerFilter, plr, s)
+                        include = not okFilter or value ~= false
+                    end
+                    if include then
+                        out[#out + 1] = s
+                    else
+                        self:_clearCham(r)
+                    end
                 else
                     self:_clearCham(r)
                 end
@@ -1770,24 +1858,43 @@ function ESP:_snapNPC(out, eye)
         if added >= cullMax then break end
         local model = list[i]
         if typeof(model) == "Instance" and model.Parent then
-            local hum = model:FindFirstChildOfClass("Humanoid")
-            local rootPart = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+            local rec = recs[model]
+            if not rec then
+                self._npcId = (self._npcId or 0) + 1
+                rec = { uid = -self._npcId, model = model, hitAt = -1, hitDmg = 0, hp = 0, hp0 = 0, maxHp = 100, hum = nil, root = nil, head = nil, vitalMode = nil, visParts = nil, visChar = nil, matParts = nil, matPartsAt = nil, label = nil, labelAt = nil }
+                recs[model] = rec
+            end
+            local hum = rec.hum
+            if not hum or hum.Parent ~= model then
+                hum = model:FindFirstChildOfClass("Humanoid")
+                rec.hum = hum
+            end
+            local rootPart = rec.root
+            if not rootPart or rootPart.Parent ~= model then
+                rootPart = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                rec.root = rootPart
+            end
             if rootPart then
-                local hAttr = model:GetAttribute("Health")
-                local hp = tonumber(hAttr) or (hum and hum.Health) or 0
-                local maxHp = (hum and hum.MaxHealth) or 100
-                if maxHp <= 0 then
-                    maxHp = 100
+                if rec.vitalMode == nil then
+                    rec.vitalMode = numberField(model, NPC_HP_FIELDS) ~= nil or numberField(model, NPC_MAX_HP_FIELDS) ~= nil or numberField(hum, NPC_HP_FIELDS) ~= nil or numberField(hum, NPC_MAX_HP_FIELDS) ~= nil
                 end
-                local dead = model:GetAttribute("Dead") == true or (hum and hum.Health <= 0 and hAttr == nil)
+                local hp, maxHp
+                if rec.vitalMode then
+                    hp, maxHp = npcVitals(model, hum)
+                else
+                    hp, maxHp = hum and tonumber(hum.Health) or 0, hum and tonumber(hum.MaxHealth) or 100
+                end
+                local dead = model:GetAttribute("Dead") == true or hp <= 0
                 if hp > 0 and not dead then
                     local dist = (eye - rootPart.Position).Magnitude
                     if dist <= reach then
-                        local rec = recs[model]
-                        if not rec then
-                            self._npcId = (self._npcId or 0) + 1
-                            rec = { uid = -self._npcId, model = model, hitAt = -1, hitDmg = 0, hp = hp, hp0 = hp, maxHp = maxHp }
-                            recs[model] = rec
+                        local head = rec.head
+                        if head and head.Parent ~= model then
+                            head = nil
+                        end
+                        if not head then
+                            head = model:FindFirstChild("Head")
+                            rec.head = head
                         end
                         seen[model] = true
                         rec.hp = hp
@@ -1797,21 +1904,24 @@ function ESP:_snapNPC(out, eye)
                         end
                         rec.hp0 = hp
                         if needVis and (self:_turn(rec.uid, npcBoxStep, 23) or rec.vis == nil) then
-                            rec.vis = self:_canSee(model, ncfg.vis.points)
+                            rec.vis = self:_canSee(model, ncfg.vis.points, rec)
                         end
-                        local label = model.Name
-                        if type(self.npcLabel) == "function" then
-                            local ok2, lb = pcall(self.npcLabel, model)
-                            if ok2 and lb then
-                                label = lb
+                        if not rec.label or not rec.labelAt or self.frame - rec.labelAt >= 30 then
+                            rec.label = model.Name
+                            if type(self.npcLabel) == "function" then
+                                local ok2, lb = pcall(self.npcLabel, model)
+                                if ok2 and lb then
+                                    rec.label = lb
+                                end
                             end
+                            rec.labelAt = self.frame
                         end
-                        local s = self:_mkSnap(rec, model, rootPart, model:FindFirstChild("Head"), hum, dist, npcBoxStep, 17, function()
+                        local s = self:_mkSnap(rec, model, rootPart, head, hum, dist, npcBoxStep, 17, function()
                             return model:GetBoundingBox()
                         end)
                         s.npc = true
                         s.tool = ""
-                        s.name = label
+                        s.name = rec.label
                         s.ally = false
                         s.friend = false
                         s.cfg = ncfg
@@ -1947,6 +2057,9 @@ function ESP:_ring(key, pos, spec, lod)
 end
 
 function ESP:_bones(s, c)
+    if not withinFeatureRange((s.cfg or self.cfg).bones, s.dist) then
+        return
+    end
     local set = s.char:FindFirstChild("UpperTorso") and R15 or R6
     for i, pair in ipairs(set) do
         local a = s.char:FindFirstChild(pair[1])
@@ -2017,10 +2130,15 @@ function ESP:_segs(key, seg, c, w, a, outline, aOut, zOut, zIn)
     end
 end
 
+local function withinFeatureRange(spec, dist)
+    local range = spec and tonumber(spec.range)
+    return not range or range <= 0 or dist <= range
+end
+
 function ESP:_boxDraw(s, c, a)
     local b = (s.cfg or self.cfg).box
     local x, y, w, h = s.bx, s.by, s.bw, s.bh
-    if not b.on or not x then
+    if not b.on or not withinFeatureRange(b, s.dist) or not x then
         return
     end
     if b.kind == "3d" or b.kind == "3dcorner" then
@@ -2069,7 +2187,7 @@ end
 
 function ESP:_hpDraw(s, a)
     local cfg = (s.cfg or self.cfg).hp
-    if not cfg.on or s.maxHp <= 0 or not s.bx then
+    if not cfg.on or not withinFeatureRange(cfg, s.dist) or s.maxHp <= 0 or not s.bx then
         return
     end
     local x = cfg.side == "right" and (s.bx + s.bw + 4) or (s.bx - 4 - cfg.w)
@@ -2090,7 +2208,7 @@ end
 
 function ESP:_nameDraw(s, c, a)
     local n = (s.cfg or self.cfg).name
-    if not n.on or not s.bx then
+    if not n.on or not withinFeatureRange(n, s.dist) or not s.bx then
         return s.by - 4
     end
     local txt
@@ -2119,7 +2237,7 @@ end
 
 function ESP:_distDraw(s, c, a, y)
     local root = s.cfg or self.cfg
-    if not root.dist.on or not s.bx then
+    if not root.dist.on or not withinFeatureRange(root.dist, s.dist) or not s.bx then
         return y
     end
     local d = root.dist
@@ -2130,7 +2248,7 @@ end
 
 function ESP:_tracer(s, c, a)
     local tc = (s.cfg or self.cfg).tracer
-    if not tc.on or not s.bx then
+    if not tc.on or not withinFeatureRange(tc, s.dist) or not s.bx then
         return
     end
     local vp = cam.ViewportSize
@@ -2180,7 +2298,17 @@ function ESP:_player(s)
     if s.depth <= 0 or not s.bx then
         return
     end
-    if cfg.espRange > 0 and s.dist > cfg.espRange then
+    local featureRange = max(
+        tonumber(cfg.box.range) or 0,
+        tonumber(cfg.name.range) or 0,
+        tonumber(cfg.dist.range) or 0,
+        tonumber(cfg.hp.range) or 0,
+        tonumber(cfg.bones.range) or 0,
+        tonumber(cfg.tracer.range) or 0,
+        tonumber(cfg.arrow.range) or 0
+    )
+    local reach = max(featureRange, tonumber(cfg.espRange) or 0)
+    if reach > 0 and s.dist > reach then
         return
     end
 
@@ -2232,6 +2360,12 @@ end
 function ESP:_arrow(s)
     local root = s.cfg or self.cfg
     local cfg = root.arrow
+    if not s.npc and not self.cfg.players.on then
+        return
+    end
+    if root.vis.hide and s.vis == false then
+        return
+    end
     if s.npc then
         if not self.cfg.npc or not self.cfg.npc.arrow.on then
             return
@@ -2239,7 +2373,7 @@ function ESP:_arrow(s)
     elseif not self.cfg.arrow.on then
         return
     end
-    if not cfg.on or not cam then
+    if not cfg.on or not withinFeatureRange(cfg, s.dist) or not cam then
         return
     end
     if root.team and s.ally then
@@ -2263,7 +2397,16 @@ function ESP:_arrow(s)
     local rad = min(cfg.rad, cfg.rad * cfg.scale * (500 / max(s.dist, 1)))
     local ax, ay = cx + dx * rad, cy + dy * rad
     local rot = atan2(dy, dx)
-    local c = root.rainbow and hue(self.t * 0.12) or cfg.col
+    local c
+    if root.rainbow then
+        c = hue(self.t * 0.12)
+    elseif cfg.colorMode == "gradient" then
+        c = col(cfg.colNear, cfg.col):Lerp(col(cfg.colFar, cfg.col), clamp(s.dist / max(cfg.range or 1, 1), 0, 1))
+    elseif cfg.colorMode == "range" then
+        c = Color3.fromRGB(110, 235, 150):Lerp(Color3.fromRGB(255, 75, 85), clamp(s.dist / max(cfg.range or 1, 1), 0, 1))
+    else
+        c = cfg.col
+    end
     local sz = cfg.size
     if cfg.fill then
         if cfg.outline then
@@ -2695,8 +2838,11 @@ function ESP:_ents()
         local _, _, d, on = self._proj(pos)
         if not on or d <= 0 then return end
         local scale = tonumber(e.scale) or 1
-        if scale > 0 and scale ~= 1 then
-            size = size * scale
+        local scaleX = tonumber(e.scaleX) or scale
+        local scaleY = tonumber(e.scaleY) or scale
+        local scaleZ = tonumber(e.scaleZ) or scale
+        if scaleX > 0 and scaleY > 0 and scaleZ > 0 and (scaleX ~= 1 or scaleY ~= 1 or scaleZ ~= 1) then
+            size = v3(size.X * scaleX, size.Y * scaleY, size.Z * scaleZ)
         end
         local visible = true
         if e.visCheck or e.hideOccluded or e.visTint then
@@ -2781,6 +2927,13 @@ function ESP:_clearCham(r)
         end)
         r.cham = nil
     end
+    if r.wallCham then
+        pcall(function()
+            r.wallCham.Enabled = false
+            r.wallCham:Destroy()
+        end)
+        r.wallCham = nil
+    end
     if r.mat then
         for part, old in pairs(r.mat) do
             if part and part.Parent then
@@ -2793,6 +2946,21 @@ function ESP:_clearCham(r)
         r.matKind = nil
     end
     r.matAt = nil
+end
+
+function ESP:_partVisible(char, part)
+    if not cam or not char or not part or not part.Parent then
+        return false
+    end
+    local origin = cam.CFrame.Position
+    local direction = part.Position - origin
+    if direction.Magnitude <= 0.01 then
+        return true
+    end
+    local mine = lp.Character
+    self.rp.FilterDescendantsInstances = mine and { mine } or {}
+    local hit = workspace:Raycast(origin, direction, self.rp)
+    return not hit or (hit.Instance and hit.Instance:IsDescendantOf(char))
 end
 
 function ESP:_cham(s)
@@ -2815,7 +2983,7 @@ function ESP:_cham(s)
         c = hue(self.t * cfg.rate * 0.12 + s.uid * 0.01)
         line = c
     end
-    if cfg.mode == "material" then
+    if cfg.mode == "material" or cfg.mode == "texture" then
         if r.cham then
             pcall(function()
                 r.cham:Destroy()
@@ -2831,25 +2999,76 @@ function ESP:_cham(s)
             r.matKind = cfg.mat
         end
         if r.mat and r.matAt and self.frame - r.matAt < max(1, tonumber(self.cfg.perf.toolStep) or 14) then
-            for part in pairs(r.mat) do
-                if part.Parent then
-                    part.Color = c
-                end
-            end
             return
         end
         r.matAt = self.frame
         local map = r.mat or setmetatable({}, { __mode = "k" })
         r.mat = map
-        for _, part in ipairs(s.char:GetDescendants()) do
-            if part:IsA("BasePart") and part.Transparency < 1 and part.Name ~= "HumanoidRootPart" and (part.Name ~= "Head" or cfg.matHead) then
+        local partStep = max(1, tonumber(cfg.partStep) or 120)
+        if not r.matParts or not r.matPartsAt or self.frame - r.matPartsAt >= partStep then
+            local parts = {}
+            for _, part in ipairs(s.char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    parts[#parts + 1] = part
+                end
+            end
+            r.matParts = parts
+            r.matPartsAt = self.frame
+        end
+        for part, old in pairs(map) do
+            if not part.Parent or not part:IsDescendantOf(s.char) then
+                if part and part.Parent then
+                    part.Material = old[1]
+                    part.Color = old[2]
+                    part.Transparency = old[3]
+                end
+                map[part] = nil
+            end
+        end
+        for i = 1, #r.matParts do
+            local part = r.matParts[i]
+            if part.Parent and part:IsDescendantOf(s.char) and part.Transparency < 1 and part.Name ~= "HumanoidRootPart" and (part.Name ~= "Head" or cfg.matHead) then
                 if not map[part] then
                     map[part] = { part.Material, part.Color, part.Transparency }
                 end
+                local partColor = c
+                if cfg.tint and cfg.partVis then
+                    partColor = self:_partVisible(s.char, part) and col(cfg.vis, c) or col(cfg.hid, c)
+                end
                 part.Material = mat
-                part.Color = c
+                part.Color = partColor
                 part.Transparency = clamp(cfg.matA, 0, 0.95)
             end
+        end
+        if cfg.wall then
+            local wall = r.wallCham
+            if not wall or wall.Parent ~= s.char then
+                if wall then
+                    pcall(function()
+                        wall:Destroy()
+                    end)
+                end
+                wall = Instance.new("Highlight")
+                wall.Name = "easyesp_wall"
+                wall.Adornee = s.char
+                wall.Parent = s.char
+                r.wallCham = wall
+            end
+            local wallColor = c
+            if cfg.tint and s.vis ~= nil then
+                wallColor = s.vis and cfg.vis or cfg.hid
+            end
+            wall.Enabled = true
+            wall.FillColor = wallColor
+            wall.FillTransparency = clamp(cfg.wallFillA or 0.72, 0, 1)
+            wall.OutlineColor = wallColor
+            wall.OutlineTransparency = clamp(cfg.wallLineA or 0, 0, 1)
+            wall.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        elseif r.wallCham then
+            pcall(function()
+                r.wallCham:Destroy()
+            end)
+            r.wallCham = nil
         end
     else
         if r.mat then
@@ -3177,6 +3396,11 @@ end
 
 function ESP:setPlayerLabel(fn)
     self.playerLabel = type(fn) == "function" and fn or nil
+    return self
+end
+
+function ESP:setPlayerFilter(fn)
+    self.playerFilter = type(fn) == "function" and fn or nil
     return self
 end
 
